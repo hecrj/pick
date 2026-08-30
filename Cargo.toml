@@ -1,0 +1,32 @@
+[package]
+name = "pick"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+iced.version = "0.15.0-dev"
+iced.features = ["tokio", "markdown", "sipper"]
+
+serde.version = "1"
+serde.features = ["derive"]
+
+tokio.version = "1"
+tokio.features = ["fs"]
+
+tracing-subscriber.version = "0.3"
+tracing-subscriber.features = ["tracing-log"]
+
+function = "0.3"
+log = "0.4"
+reason = "0.2.0-dev"
+serde_json = "1"
+
+[lints.clippy]
+large-enum-variant = "allow"
+type-complexity = "allow"
+
+[patch.crates-io]
+iced.git = "https://github.com/iced-rs/iced.git"
+iced.rev = "62c9d07cf92f7b92a215377d9990ab783778625e"
+
+reason.path = "../reason"
