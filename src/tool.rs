@@ -75,6 +75,68 @@ impl Tool {
             })
         }
 
+        #[derive(Deserialize)]
+        struct Edit {
+            path: String,
+            old_string: String,
+            new_string: String,
+            #[serde(default)]
+            replace_all: bool,
+        }
+
+        fn edit(project: &Path, arguments: Edit) -> Task<Result> {
+            let project = project.to_path_buf();
+
+            Task::future(async move {
+                let path = project.join(&arguments.path);
+                let contents = tokio::fs::read_to_string(&path).await?;
+
+                if arguments.old_string.is_empty() {
+                    Err(std::io::Error::other("old_string must not be empty"))?
+                }
+
+                if arguments.old_string == arguments.new_string {
+                    Err(std::io::Error::other(
+                        "old_string and new_string must be different",
+                    ))?
+                }
+
+                let occurrences = contents.matches(&arguments.old_string).count();
+
+                if occurrences == 0 {
+                    Err(std::io::Error::other(format!(
+                        "old_string not found in {}",
+                        path.display()
+                    )))?
+                }
+
+                if occurrences > 1 && !arguments.replace_all {
+                    Err(std::io::Error::other(format!(
+                        "old_string matches {occurrences} locations in {}; include more context to make it unique, or set replace_all to true",
+                        path.display()
+                    )))?
+                }
+
+                let updated = if arguments.replace_all {
+                    contents.replace(&arguments.old_string, &arguments.new_string)
+                } else {
+                    contents.replacen(&arguments.old_string, &arguments.new_string, 1)
+                };
+
+                tokio::fs::write(&path, updated).await?;
+
+                if arguments.replace_all {
+                    Ok(format!(
+                        "Edited {} ({} replacements)",
+                        path.display(),
+                        occurrences
+                    ))
+                } else {
+                    Ok(format!("Edited {} (1 replacement)", path.display()))
+                }
+            })
+        }
+
         let tools = [
             Self::new(
                 "read",
@@ -117,6 +179,37 @@ impl Tool {
                 ],
                 write,
             ),
+            Self::new(
+                "edit",
+                "Edit a file by replacing an exact string match. old_string must match exactly one location in the file, including whitespace and indentation, unless replace_all is set",
+                &[
+                    Parameter {
+                        name: "path",
+                        description: "Path of the file",
+                        schema: Schema::String,
+                        required: true,
+                    },
+                    Parameter {
+                        name: "old_string",
+                        description: "Exact text to replace",
+                        schema: Schema::String,
+                        required: true,
+                    },
+                    Parameter {
+                        name: "new_string",
+                        description: "Text to replace it with",
+                        schema: Schema::String,
+                        required: true,
+                    },
+                    Parameter {
+                        name: "replace_all",
+                        description: "Replace all occurrences instead of requiring a unique match",
+                        schema: Schema::Boolean,
+                        required: false,
+                    },
+                ],
+                edit,
+            ),
         ];
 
         HashMap::from_iter(tools.into_iter().map(|tool| (tool.name, tool)))
@@ -141,6 +234,9 @@ impl Tool {
                                 param.name.to_owned(),
                                 match param.schema {
                                     Schema::String => reason::tool::Schema::String {
+                                        description: Some(param.description.to_owned()),
+                                    },
+                                    Schema::Boolean => reason::tool::Schema::Boolean {
                                         description: Some(param.description.to_owned()),
                                     },
                                 },
@@ -170,6 +266,8 @@ impl Tool {
             parameters,
             run: Box::new(move |project, json| {
                 let Ok(arguments) = serde_json::from_str(json) else {
+                    log::error!("tool arguments failed to parse!");
+
                     return Task::none(); // TODO
                 };
 
@@ -190,4 +288,5 @@ struct Parameter {
 #[derive(Debug, Clone)]
 enum Schema {
     String,
+    Boolean,
 }

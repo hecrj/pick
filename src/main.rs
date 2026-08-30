@@ -453,7 +453,7 @@ impl Pick {
         let reason = reason.clone();
         let model = model.clone();
         let messages: Vec<_> = [reason::Message::System(
-            "You are a helpful coding assistant. The user is working on a project in the current directory.".to_owned(),
+            "You are an expert coding assistant. The user wants your help to develop a project in the current directory.".to_owned(),
         )]
         .into_iter()
         .chain(self.messages.iter().map(Item::to_message))
