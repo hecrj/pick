@@ -8,8 +8,8 @@ use iced::task;
 use iced::time;
 use iced::widget::operation;
 use iced::widget::{
-    bottom, center, center_x, column, container, markdown, right, row, scrollable, sensor, space,
-    stack, text, text_editor,
+    bottom, center, center_x, column, container, markdown, progress_bar, right, row, scrollable,
+    sensor, space, stack, text, text_editor,
 };
 use iced::{Center, Element, Fill, Fit, Font, Size, Subscription, Task, Theme};
 
@@ -89,9 +89,27 @@ impl Item {
                     None
                 };
 
+                let prompt_progress = if reply.prompt.total != reply.prompt.processed {
+                    let progress = center_x(
+                        progress_bar(
+                            0.0..=1.0,
+                            (reply.prompt.processed - reply.prompt.cached) as f32
+                                / (reply.prompt.total - reply.prompt.cached) as f32,
+                        )
+                        .girth(10)
+                        .length(100)
+                        .style(progress_bar::secondary),
+                    );
+
+                    Some(progress)
+                } else {
+                    None
+                };
+
                 column![
+                    prompt_progress,
                     reasoning,
-                    (!reply.content.raw.is_empty()).then(|| reply.content.view())
+                    (!reply.content.raw.is_empty()).then(|| reply.content.view()),
                 ]
                 .spacing(10)
                 .into()
@@ -183,6 +201,7 @@ impl Markdown {
 
 #[derive(Debug, Default)]
 struct Reply {
+    prompt: reason::Progress,
     reasoning: Markdown,
     content: Markdown,
     tool_calls: Vec<reason::tool::Call>,
@@ -359,6 +378,11 @@ impl Pick {
                 reply.timings = event.timings;
 
                 let task = match event.delta {
+                    reason::Delta::PromptProcessed(progress) => {
+                        reply.prompt = progress;
+
+                        Task::none()
+                    }
                     reason::Delta::ReasoningChanged(delta) => {
                         reply.reasoning.push_str(&delta);
 
@@ -582,18 +606,22 @@ impl Pick {
 
                 let info = timings.map(|timings| {
                     row![
-                        text!(
-                            "{tokens_per_second:0.2}↑",
-                            tokens_per_second = 1.0 / timings.prompt.token.as_secs_f64(),
-                        )
-                        .style(text::secondary)
-                        .size(SMALL),
-                        text!(
-                            "↓{tokens_per_second:0.2}",
-                            tokens_per_second = 1.0 / timings.predicted.token.as_secs_f64(),
-                        )
-                        .style(text::success)
-                        .size(SMALL)
+                        (timings.prompt.token > time::Duration::ZERO).then(|| {
+                            text!(
+                                "{tokens_per_second:0.2}↑",
+                                tokens_per_second = 1.0 / timings.prompt.token.as_secs_f64(),
+                            )
+                            .style(text::secondary)
+                            .size(SMALL)
+                        }),
+                        (timings.predicted.token > time::Duration::ZERO).then(|| {
+                            text!(
+                                "↓{tokens_per_second:0.2}",
+                                tokens_per_second = 1.0 / timings.predicted.token.as_secs_f64(),
+                            )
+                            .style(text::success)
+                            .size(SMALL)
+                        })
                     ]
                     .spacing(10)
                 });
