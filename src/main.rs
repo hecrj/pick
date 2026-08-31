@@ -39,11 +39,17 @@ struct Pick {
     input_height: f32,
     content_width: f32,
     snap_to_bottom: bool,
-    completion: Option<task::Handle>,
+    tasks: HashMap<Work, task::Handle>,
     tools: HashMap<&'static str, Tool>,
     project: PathBuf,
     home: Option<PathBuf>,
     server: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum Work {
+    Completion,
+    Tool(reason::tool::Id),
 }
 
 enum Item {
@@ -223,7 +229,7 @@ enum Message {
     ReplyProgressed(reason::Event),
     ReplyReceived(Result<reason::Reply, reason::Error>),
     LinkClicked(markdown::Uri),
-    ToolFinished(usize, Result<String, reason::Error>),
+    ToolFinished(reason::tool::Id, Result<String, reason::Error>),
 }
 
 impl Pick {
@@ -237,7 +243,7 @@ impl Pick {
             input_height: 0.0,
             content_width: 0.0,
             snap_to_bottom: true,
-            completion: None,
+            tasks: HashMap::new(),
             project: env::current_dir().unwrap_or_default(),
             home: env::home_dir(),
             server: "http://127.0.0.1:9931".to_owned(),
@@ -316,23 +322,39 @@ impl Pick {
                 self.input = text_editor::Content::new();
                 self.messages.push(Item::User(Markdown::new(message)));
 
-                self.completion = None;
+                self.tasks.clear();
                 self.work()
             }
             Message::ReplyProgressed(event) => {
-                let Some(Item::Assistant(reply)) = self.messages.last_mut() else {
+                let Some(Item::Assistant(reply)) = self
+                    .messages
+                    .iter_mut()
+                    .rev()
+                    .find(|message| !matches!(message, Item::Tool(_)))
+                else {
                     return Task::none();
                 };
 
-                match event {
+                let task = match event {
                     reason::Event::ReasoningChanged { delta, .. } => {
                         reply.reasoning.push_str(&delta);
+
+                        Task::none()
                     }
                     reason::Event::ContentChanged { delta, .. } => {
                         reply.content.push_str(&delta);
+
+                        Task::none()
                     }
                     reason::Event::ToolCallAdded(call) => {
+                        let last_call = reply.tool_calls.last().cloned();
                         reply.tool_calls.push(call);
+
+                        let Some(call) = last_call else {
+                            return Task::none();
+                        };
+
+                        self.run(call)
                     }
                     reason::Event::ArgumentsChanged { delta } => {
                         let Some(tool_call) = reply.tool_calls.last_mut() else {
@@ -340,62 +362,53 @@ impl Pick {
                         };
 
                         tool_call.arguments.push_str(&delta);
-                    }
-                }
 
-                if self.snap_to_bottom {
-                    operation::snap_to_end("scroll")
-                } else {
-                    Task::none()
-                }
+                        Task::none()
+                    }
+                };
+
+                Task::batch([
+                    task,
+                    if self.snap_to_bottom {
+                        operation::snap_to_end("scroll")
+                    } else {
+                        Task::none()
+                    },
+                ])
             }
             Message::ReplyReceived(Ok(_reply)) => {
-                self.completion = None;
+                let _ = self.tasks.remove(&Work::Completion);
 
-                let Some(Item::Assistant(reply)) = self.messages.last_mut() else {
+                let Some(Item::Assistant(reply)) = self
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|message| !matches!(message, Item::Tool(_)))
+                else {
                     return Task::none();
                 };
 
-                let tool_calls = reply.tool_calls.clone();
-                let start = self.messages.len();
-
-                let (run, handle) = Task::batch(
-                    tool_calls
-                        .iter()
-                        .map(|call| match self.tools.get(call.name.as_str()) {
-                            Some(tool) => tool.run(&self.project, &call.arguments),
-                            None => {
-                                let name = call.name.clone();
-
-                                Box::pin(async move {
-                                    Err(std::io::Error::other(format!("unknown tool: {name}")))?
-                                })
-                            }
-                        })
-                        .map(Task::future)
-                        .enumerate()
-                        .map(|(i, task)| task.map(Message::ToolFinished.with(start + i))),
-                )
-                .abortable();
-
-                for call in tool_calls {
-                    self.messages.push(Item::Tool(ToolRun {
-                        call,
-                        status: Status::Running,
-                    }));
+                if let Some(call) = reply.tool_calls.last().cloned() {
+                    self.run(call)
+                } else {
+                    Task::none()
                 }
-
-                self.completion = Some(handle.abort_on_drop());
-
-                run
             }
             Message::LinkClicked(uri) => {
                 dbg!(uri);
 
                 Task::none()
             }
-            Message::ToolFinished(i, result) => {
-                let Some(Item::Tool(tool)) = self.messages.get_mut(i) else {
+            Message::ToolFinished(id, result) => {
+                let Some(tool) = self.messages.iter_mut().find_map(|message| {
+                    if let Item::Tool(tool) = message
+                        && tool.call.id == id
+                    {
+                        Some(tool)
+                    } else {
+                        None
+                    }
+                }) else {
                     return Task::none();
                 };
 
@@ -404,20 +417,9 @@ impl Pick {
                     Err(error) => Status::Error(error.to_string()),
                 };
 
-                let all_finished = self
-                    .messages
-                    .iter()
-                    .rev()
-                    .take_while(|message| matches!(message, Item::Tool(_)))
-                    .all(|message| {
-                        let Item::Tool(tool) = message else {
-                            return true;
-                        };
+                let _ = self.tasks.remove(&Work::Tool(id));
 
-                        !matches!(tool.status, Status::Running)
-                    });
-
-                if all_finished {
+                if self.tasks.is_empty() {
                     self.work()
                 } else {
                     Task::none()
@@ -427,7 +429,7 @@ impl Pick {
             | Message::ModelsListed(Err(error))
             | Message::ReplyReceived(Err(error)) => {
                 self.connection = Connection::Disconnected;
-                self.completion = None;
+                self.tasks.clear();
 
                 log::error!("{error}");
 
@@ -439,7 +441,7 @@ impl Pick {
     fn work(&mut self) -> Task<Message> {
         use iced::task::{Sipper, sipper};
 
-        if self.completion.is_some() {
+        if !self.tasks.is_empty() {
             return Task::none();
         }
 
@@ -469,10 +471,35 @@ impl Pick {
         )
         .abortable();
 
-        self.completion = Some(handle.abort_on_drop());
+        self.tasks.insert(Work::Completion, handle.abort_on_drop());
         self.messages.push(Item::Assistant(Reply::default()));
 
         reply
+    }
+
+    fn run(&mut self, call: reason::tool::Call) -> Task<Message> {
+        let (run, handle) = Task::perform(
+            match self.tools.get(call.name.as_str()) {
+                Some(tool) => tool.run(&self.project, &call.arguments),
+                None => {
+                    let name = call.name.clone();
+
+                    Box::pin(
+                        async move { Err(std::io::Error::other(format!("unknown tool: {name}")))? },
+                    )
+                }
+            },
+            Message::ToolFinished.with(call.id.clone()),
+        )
+        .abortable();
+
+        self.tasks.insert(Work::Tool(call.id.clone()), handle);
+        self.messages.push(Item::Tool(ToolRun {
+            call,
+            status: Status::Running,
+        }));
+
+        run
     }
 
     fn view(&self) -> Element<'_, Message> {
