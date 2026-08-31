@@ -334,8 +334,17 @@ impl Pick {
                 self.input = text_editor::Content::new();
                 self.messages.push(Item::User(Markdown::new(message)));
 
-                self.tasks.clear();
-                self.work()
+                if self.tasks.is_empty() {
+                    self.work()
+                } else {
+                    self.tasks.clear();
+
+                    // Wait for a couple seconds to server slots return to idle
+                    // This is necessary for proper reuse of prompt caches
+                    Task::future(tokio::time::sleep(time::seconds(2)))
+                        .discard()
+                        .chain(self.work())
+                }
             }
             Message::ReplyProgressed(event) => {
                 let Some(Item::Assistant(reply)) = self
