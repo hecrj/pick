@@ -32,18 +32,23 @@ impl Tool {
             let project = project.to_path_buf();
 
             Box::pin(async move {
+                let command = format!("exec 2>&1; {}", arguments.command);
+
                 let output = tokio::process::Command::new("bash")
-                    .args(["-c", &arguments.command])
+                    .args(["-c", &command])
                     .current_dir(project)
                     .output()
                     .await?;
 
+                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+
                 if output.status.success() {
-                    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+                    Ok(stdout)
                 } else {
-                    Err(std::io::Error::other(
-                        String::from_utf8_lossy(&output.stderr).into_owned(),
-                    ))?
+                    Err(std::io::Error::other(format!(
+                        "{status}\n{stdout}",
+                        status = output.status
+                    )))?
                 }
             })
         }
