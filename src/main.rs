@@ -313,7 +313,14 @@ impl Pick {
                 Task::none()
             }
             Message::ContentScrolled(viewport) => {
-                self.snap_to_bottom = viewport.relative_offset().y > 0.98;
+                let offset = viewport.absolute_offset();
+                let bounds = viewport.bounds();
+                let content_bounds = viewport.content_bounds();
+
+                let distance_to_bottom =
+                    (content_bounds.height - bounds.height - offset.y).max(0.0);
+
+                self.snap_to_bottom = distance_to_bottom <= SNAP_TO_BOTTOM;
 
                 Task::none()
             }
@@ -640,6 +647,7 @@ impl Pick {
 const TITLE: u32 = 20;
 const SMALL: u32 = 14;
 const MAX_WIDTH: u32 = 770;
+const SNAP_TO_BOTTOM: f32 = 20.0;
 
 fn tildify(path: &Path, home: Option<&Path>) -> PathBuf {
     let Some(home) = home else {
