@@ -15,8 +15,9 @@ use iced::{Center, Element, Fill, Fit, Font, Size, Subscription, Task, Theme};
 
 use function::Binary;
 use reason::Reason;
+use reason::model;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -32,8 +33,8 @@ fn main() -> Result<(), iced::Error> {
 
 struct Pick {
     connection: Connection,
-    models: Vec<reason::Model>,
-    model: Option<reason::Model>,
+    models: BTreeMap<model::Id, reason::Model>,
+    model: Option<model::Id>,
     messages: Vec<Item>,
     input: text_editor::Content,
     input_height: f32,
@@ -237,7 +238,7 @@ impl Pick {
     fn new() -> (Self, Task<Message>) {
         let mut pick = Self {
             connection: Connection::Disconnected,
-            models: Vec::new(),
+            models: BTreeMap::new(),
             model: None,
             messages: Vec::new(),
             input: text_editor::Content::new(),
@@ -285,14 +286,17 @@ impl Pick {
                 Connection::Connecting => Task::none(),
             },
             Message::ModelsListed(Ok(models)) => {
-                self.models = models;
+                self.models = models
+                    .into_iter()
+                    .map(|model| (model.id.clone(), model))
+                    .collect();
 
                 if self
                     .model
                     .as_ref()
-                    .is_none_or(|model| !self.models.contains(model))
+                    .is_none_or(|model| !self.models.contains_key(model))
                 {
-                    self.model = self.models.first().cloned();
+                    self.model = self.models.keys().next().cloned();
                 }
 
                 Task::none()
@@ -559,57 +563,62 @@ impl Pick {
             let project = tildify(&self.project, self.home.as_deref());
 
             let server = {
+                let timings = self.messages.iter().rev().find_map(|item| {
+                    if let Item::Assistant(reply) = item {
+                        reply.timings
+                    } else {
+                        None
+                    }
+                });
+
+                let info = timings.map(|timings| {
+                    row![
+                        text!(
+                            "{tokens_per_second:0.2}↑",
+                            tokens_per_second = 1.0 / timings.prompt.token.as_secs_f64(),
+                        )
+                        .style(text::secondary)
+                        .size(SMALL),
+                        text!(
+                            "↓{tokens_per_second:0.2}",
+                            tokens_per_second = 1.0 / timings.predicted.token.as_secs_f64(),
+                        )
+                        .style(text::success)
+                        .size(SMALL)
+                    ]
+                    .spacing(10)
+                });
+
                 let models = if let Some(model) = self.model.as_ref() {
                     text(model.as_str())
                 } else {
-                    text("No models found!").style(text::warning)
+                    text("No models found!")
                 }
                 .size(SMALL)
                 .width(Fit.max(200))
                 .wrapping(text::Wrapping::None)
-                .ellipsis(text::Ellipsis::End);
+                .ellipsis(text::Ellipsis::End)
+                .style(|theme: &Theme| {
+                    let palette = theme.seed();
 
-                let context: Element<'_, _> = match &self.connection {
-                    Connection::Disconnected => {
-                        text("Disconnected").size(SMALL).style(text::danger).into()
+                    text::Style {
+                        color: match &self.connection {
+                            Connection::Disconnected => Some(palette.danger),
+                            Connection::Connecting => Some(palette.warning),
+                            Connection::Connected(_) => None,
+                        },
                     }
-                    Connection::Connecting => text("Connecting...")
-                        .size(SMALL)
-                        .style(text::warning)
-                        .into(),
-                    Connection::Connected(_) => {
-                        let timings = self.messages.iter().rev().find_map(|item| {
-                            if let Item::Assistant(reply) = item {
-                                reply.timings
-                            } else {
-                                None
-                            }
-                        });
+                });
 
-                        if let Some(timings) = timings {
-                            row![
-                                text!(
-                                    "{tokens_per_second:0.2}",
-                                    tokens_per_second = 1.0 / timings.prompt.token.as_secs_f64(),
-                                )
-                                .style(text::secondary)
-                                .size(SMALL),
-                                text!(
-                                    "{tokens_per_second:0.2}",
-                                    tokens_per_second = 1.0 / timings.predicted.token.as_secs_f64(),
-                                )
-                                .style(text::success)
-                                .size(SMALL)
-                            ]
-                            .spacing(10)
-                            .into()
-                        } else {
-                            text("Connected").size(SMALL).style(text::success).into()
-                        }
-                    }
-                };
+                let context_size = self
+                    .model
+                    .as_ref()
+                    .and_then(|model| self.models.get(model))
+                    .and_then(|model| model.context_size);
 
-                row![models, context].spacing(10).align_y(Center)
+                let context = context_led(context_size, timings);
+
+                row![info, models, context].spacing(10).align_y(Center)
             };
 
             row![
@@ -659,4 +668,112 @@ fn tildify(path: &Path, home: Option<&Path>) -> PathBuf {
         Ok(rest) => Path::new("~").join(rest),
         Err(_) => path.to_path_buf(),
     }
+}
+
+fn context_led<'a>(
+    context_size: Option<u64>,
+    timings: Option<reason::Timings>,
+) -> Element<'a, Message> {
+    use iced::mouse;
+    use iced::widget::canvas;
+    use iced::{Radians, Rectangle, Renderer};
+
+    use std::cell::RefCell;
+    use std::f32::consts::{FRAC_PI_2, PI};
+
+    const SIZE: f32 = 14.0;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    struct Led {
+        context_size: Option<u64>,
+        timings: Option<reason::Timings>,
+    }
+
+    #[derive(Default)]
+    struct State {
+        last: RefCell<Led>,
+        cache: canvas::Cache,
+    }
+
+    impl canvas::Program<Message> for Led {
+        type State = State;
+
+        fn draw(
+            &self,
+            state: &Self::State,
+            renderer: &Renderer,
+            theme: &Theme,
+            bounds: Rectangle,
+            _cursor: mouse::Cursor,
+        ) -> Vec<canvas::Geometry> {
+            const STROKE_WIDTH: f32 = 2.0;
+
+            if *state.last.borrow() != *self {
+                *state.last.borrow_mut() = *self;
+                state.cache.clear();
+            }
+
+            let geometry = state.cache.draw(renderer, bounds.size(), |frame| {
+                let palette = theme.palette();
+                let radius = (frame.width() - STROKE_WIDTH) / 2.0;
+                let circle = canvas::Path::circle(frame.center(), radius);
+
+                frame.stroke(
+                    &circle,
+                    canvas::Stroke {
+                        style: canvas::Style::Solid(palette.background.strong.color),
+                        width: STROKE_WIDTH,
+                        ..canvas::Stroke::default()
+                    },
+                );
+
+                if let Some(timings) = self.timings
+                    && let Some(context_size) = self.context_size
+                {
+                    let tokens_used =
+                        timings.cached + timings.prompt.amount + timings.predicted.amount;
+
+                    let usage = tokens_used as f32 / context_size as f32;
+
+                    let arc = {
+                        let mut builder = canvas::path::Builder::new();
+
+                        let start = -FRAC_PI_2;
+
+                        builder.arc(canvas::path::Arc {
+                            center: frame.center(),
+                            radius,
+                            start_angle: Radians(start),
+                            end_angle: Radians(start + 2.0 * PI * usage),
+                        });
+
+                        builder.build()
+                    };
+
+                    frame.stroke(
+                        &arc,
+                        canvas::Stroke {
+                            style: canvas::Style::Solid(match usage {
+                                0.0..0.8 => palette.primary.base.color,
+                                0.8..0.9 => palette.warning.base.color,
+                                _ => palette.danger.base.color,
+                            }),
+                            width: STROKE_WIDTH + 1.0,
+                            ..canvas::Stroke::default()
+                        },
+                    );
+                }
+            });
+
+            vec![geometry]
+        }
+    }
+
+    canvas(Led {
+        timings,
+        context_size,
+    })
+    .width(SIZE)
+    .height(SIZE)
+    .into()
 }

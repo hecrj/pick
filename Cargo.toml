@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 iced.version = "0.15.0-dev"
-iced.features = ["tokio", "markdown", "sipper"]
+iced.features = ["tokio", "sipper", "markdown", "canvas"]
 
 serde.version = "1"
 serde.features = ["derive"]
@@ -29,4 +29,7 @@ type-complexity = "allow"
 iced.git = "https://github.com/iced-rs/iced.git"
 iced.rev = "62c9d07cf92f7b92a215377d9990ab783778625e"
 
-reason.path = "../reason"
+reason.git = "https://github.com/hecrj/reason.git"
+reason.rev = "47f3e8474e2a3b5a4198b148791bb838d7aac1cb"
+
+# reason.path = "../reason"
