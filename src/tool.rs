@@ -1,19 +1,19 @@
-use iced::Task;
-
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use tokio::io::AsyncReadExt;
 
 use std::collections::HashMap;
 use std::path::Path;
-use tokio::io::AsyncReadExt;
+use std::pin::Pin;
 
 type Result = ::core::result::Result<String, reason::Error>;
+type Future = Pin<Box<dyn std::future::Future<Output = Result> + Send>>;
 
 pub struct Tool {
     name: &'static str,
     description: &'static str,
     parameters: &'static [Parameter],
-    run: Box<dyn Fn(&Path, &str) -> Task<Result>>,
+    run: Box<dyn Fn(&Path, &str) -> Future>,
 }
 
 impl Tool {
@@ -28,10 +28,10 @@ impl Tool {
             command: String,
         }
 
-        fn bash(project: &Path, arguments: Bash) -> Task<Result> {
+        fn bash(project: &Path, arguments: Bash) -> Future {
             let project = project.to_path_buf();
 
-            Task::future(async move {
+            Box::pin(async move {
                 let output = tokio::process::Command::new("bash")
                     .args(["-c", &arguments.command])
                     .current_dir(project)
@@ -57,10 +57,10 @@ impl Tool {
             limit: Option<u64>,
         }
 
-        fn read(project: &Path, arguments: Read) -> Task<Result> {
+        fn read(project: &Path, arguments: Read) -> Future {
             let project = project.to_path_buf();
 
-            Task::future(async move {
+            Box::pin(async move {
                 let offset = match arguments.offset {
                     Some(offset) if offset > 0 => offset,
                     Some(_) => Err(std::io::Error::other(
@@ -200,10 +200,10 @@ impl Tool {
             content: String,
         }
 
-        fn write(project: &Path, arguments: Write) -> Task<Result> {
+        fn write(project: &Path, arguments: Write) -> Future {
             let project = project.to_path_buf();
 
-            Task::future(async move {
+            Box::pin(async move {
                 let path = project.join(&arguments.path);
 
                 tokio::fs::write(&path, arguments.content).await?;
@@ -221,10 +221,10 @@ impl Tool {
             replace_all: bool,
         }
 
-        fn edit(project: &Path, arguments: Edit) -> Task<Result> {
+        fn edit(project: &Path, arguments: Edit) -> Future {
             let project = project.to_path_buf();
 
-            Task::future(async move {
+            Box::pin(async move {
                 let path = project.join(&arguments.path);
                 let contents = tokio::fs::read_to_string(&path).await?;
 
@@ -368,7 +368,7 @@ impl Tool {
         HashMap::from_iter(tools.into_iter().map(|tool| (tool.name, tool)))
     }
 
-    pub fn run(&self, project: impl AsRef<Path>, arguments: &str) -> Task<Result> {
+    pub fn run(&self, project: impl AsRef<Path>, arguments: &str) -> Future {
         (self.run)(project.as_ref(), arguments)
     }
 
@@ -414,21 +414,26 @@ impl Tool {
         name: &'static str,
         description: &'static str,
         parameters: &'static [Parameter],
-        run: fn(&Path, Arguments) -> Task<Result>,
+        run: fn(&Path, Arguments) -> Future,
     ) -> Self {
         Self {
             name,
             description,
             parameters,
-            run: Box::new(move |project, json| {
-                let Ok(arguments) = serde_json::from_str(json) else {
-                    log::error!("tool arguments failed to parse!");
+            run: Box::new(
+                move |project, json| match serde_json::from_str::<Arguments>(json) {
+                    Ok(arguments) => run(project, arguments),
+                    Err(error) => {
+                        log::error!("tool arguments failed to parse: {error}");
 
-                    return Task::none(); // TODO
-                };
-
-                run(project, arguments)
-            }),
+                        Box::pin(async move {
+                            Err(std::io::Error::other(format!(
+                                "tool arguments failed to parse: {error}"
+                            )))?
+                        })
+                    }
+                },
+            ),
         }
     }
 }

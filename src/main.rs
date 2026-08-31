@@ -126,7 +126,7 @@ impl Item {
                 let palette = theme.seed();
 
                 let color = match tool.status {
-                    Status::Running { .. } => palette.warning,
+                    Status::Running => palette.warning,
                     Status::Success(_) => palette.success.scale_alpha(0.5),
                     Status::Error(_) => palette.danger,
                 };
@@ -189,7 +189,7 @@ struct ToolRun {
 
 #[derive(Debug)]
 enum Status {
-    Running { _handle: task::Handle },
+    Running,
     Success(String),
     Error(String),
 }
@@ -197,7 +197,7 @@ enum Status {
 impl Status {
     fn content(&self) -> Option<&str> {
         match self {
-            Status::Running { .. } => None,
+            Status::Running => None,
             Status::Success(output) | Status::Error(output) => Some(output.as_str()),
         }
     }
@@ -316,6 +316,7 @@ impl Pick {
                 self.input = text_editor::Content::new();
                 self.messages.push(Item::User(Markdown::new(message)));
 
+                self.completion = None;
                 self.work()
             }
             Message::ReplyProgressed(event) => {
@@ -358,33 +359,33 @@ impl Pick {
                 let tool_calls = reply.tool_calls.clone();
                 let start = self.messages.len();
 
-                let mut handles = Vec::new();
-
-                let run = Task::batch(
+                let (run, handle) = Task::batch(
                     tool_calls
                         .iter()
-                        .filter_map(|call| {
-                            Some(
-                                self.tools
-                                    .get(call.name.as_str())?
-                                    .run(&self.project, &call.arguments),
-                            )
+                        .map(|call| match self.tools.get(call.name.as_str()) {
+                            Some(tool) => tool.run(&self.project, &call.arguments),
+                            None => {
+                                let name = call.name.clone();
+
+                                Box::pin(async move {
+                                    Err(std::io::Error::other(format!("unknown tool: {name}")))?
+                                })
+                            }
                         })
+                        .map(Task::future)
                         .enumerate()
-                        .map(|(i, task)| {
-                            let (task, handle) = task.abortable();
-                            handles.push(handle);
+                        .map(|(i, task)| task.map(Message::ToolFinished.with(start + i))),
+                )
+                .abortable();
 
-                            task.map(Message::ToolFinished.with(start + i))
-                        }),
-                );
-
-                for (call, handle) in tool_calls.into_iter().zip(handles) {
+                for call in tool_calls {
                     self.messages.push(Item::Tool(ToolRun {
                         call,
-                        status: Status::Running { _handle: handle },
+                        status: Status::Running,
                     }));
                 }
+
+                self.completion = Some(handle.abort_on_drop());
 
                 run
             }
@@ -413,7 +414,7 @@ impl Pick {
                             return true;
                         };
 
-                        !matches!(tool.status, Status::Running { .. })
+                        !matches!(tool.status, Status::Running)
                     });
 
                 if all_finished {
@@ -468,7 +469,7 @@ impl Pick {
         )
         .abortable();
 
-        self.completion = Some(handle);
+        self.completion = Some(handle.abort_on_drop());
         self.messages.push(Item::Assistant(Reply::default()));
 
         reply
