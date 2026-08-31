@@ -113,9 +113,10 @@ impl Tool {
 
                                 output.push_str(&String::from_utf8_lossy(&pending));
                                 output.push('\n');
-                                pending.clear();
                                 emitted += 1;
                             }
+
+                            pending.clear();
                         } else {
                             pending.push(byte);
                         }
