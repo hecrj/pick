@@ -768,6 +768,7 @@ fn context_led<'a>(
                                 _ => palette.danger.base.color,
                             }),
                             width: STROKE_WIDTH + 1.0,
+                            line_cap: canvas::LineCap::Round,
                             ..canvas::Stroke::default()
                         },
                     );
