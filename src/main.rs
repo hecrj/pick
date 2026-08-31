@@ -185,6 +185,7 @@ struct Reply {
     reasoning: Markdown,
     content: Markdown,
     tool_calls: Vec<reason::tool::Call>,
+    timings: Option<reason::Timings>,
 }
 
 #[derive(Debug)]
@@ -335,18 +336,20 @@ impl Pick {
                     return Task::none();
                 };
 
-                let task = match event {
-                    reason::Event::ReasoningChanged { delta, .. } => {
+                reply.timings = event.timings;
+
+                let task = match event.delta {
+                    reason::Delta::ReasoningChanged(delta) => {
                         reply.reasoning.push_str(&delta);
 
                         Task::none()
                     }
-                    reason::Event::ContentChanged { delta, .. } => {
+                    reason::Delta::ContentChanged(delta) => {
                         reply.content.push_str(&delta);
 
                         Task::none()
                     }
-                    reason::Event::ToolCallAdded(call) => {
+                    reason::Delta::ToolCallAdded(call) => {
                         let last_call = reply.tool_calls.last().cloned();
                         reply.tool_calls.push(call);
 
@@ -356,7 +359,7 @@ impl Pick {
 
                         self.run(call)
                     }
-                    reason::Event::ArgumentsChanged { delta } => {
+                    reason::Delta::ArgumentsChanged(delta) => {
                         let Some(tool_call) = reply.tool_calls.last_mut() else {
                             return Task::none();
                         };
@@ -546,6 +549,8 @@ impl Pick {
             });
 
         let status = {
+            let project = tildify(&self.project, self.home.as_deref());
+
             let server = {
                 let models = if let Some(model) = self.model.as_ref() {
                     text(model.as_str())
@@ -557,20 +562,48 @@ impl Pick {
                 .wrapping(text::Wrapping::None)
                 .ellipsis(text::Ellipsis::End);
 
-                let context = match &self.connection {
+                let context: Element<'_, _> = match &self.connection {
                     Connection::Disconnected => {
-                        text("Disconnected").size(SMALL).style(text::danger)
+                        text("Disconnected").size(SMALL).style(text::danger).into()
                     }
-                    Connection::Connecting => {
-                        text("Connecting...").size(SMALL).style(text::warning)
+                    Connection::Connecting => text("Connecting...")
+                        .size(SMALL)
+                        .style(text::warning)
+                        .into(),
+                    Connection::Connected(_) => {
+                        let timings = self.messages.iter().rev().find_map(|item| {
+                            if let Item::Assistant(reply) = item {
+                                reply.timings
+                            } else {
+                                None
+                            }
+                        });
+
+                        if let Some(timings) = timings {
+                            row![
+                                text!(
+                                    "{tokens_per_second:0.2}",
+                                    tokens_per_second = 1.0 / timings.prompt.token.as_secs_f64(),
+                                )
+                                .style(text::secondary)
+                                .size(SMALL),
+                                text!(
+                                    "{tokens_per_second:0.2}",
+                                    tokens_per_second = 1.0 / timings.predicted.token.as_secs_f64(),
+                                )
+                                .style(text::success)
+                                .size(SMALL)
+                            ]
+                            .spacing(10)
+                            .into()
+                        } else {
+                            text("Connected").size(SMALL).style(text::success).into()
+                        }
                     }
-                    Connection::Connected(_) => text("Connected").size(SMALL).style(text::success),
                 };
 
                 row![models, context].spacing(10).align_y(Center)
             };
-
-            let project = tildify(&self.project, self.home.as_deref());
 
             row![
                 text(project.display().to_string()).size(SMALL),
