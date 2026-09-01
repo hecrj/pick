@@ -712,7 +712,7 @@ fn context_led<'a>(
     timings: Option<reason::Timings>,
 ) -> Element<'a, Message> {
     use iced::mouse;
-    use iced::widget::canvas;
+    use iced::widget::{canvas, tooltip};
     use iced::{Radians, Rectangle, Renderer};
 
     use std::cell::RefCell;
@@ -807,11 +807,46 @@ fn context_led<'a>(
         }
     }
 
-    canvas(Led {
+    let led = canvas(Led {
         timings,
         context_size,
     })
     .width(SIZE)
-    .height(SIZE)
-    .into()
+    .height(SIZE);
+
+    match (context_size, timings) {
+        (Some(context_size), Some(timings)) => {
+            let tokens = timings.cached + timings.prompt.amount + timings.predicted.amount;
+            let percent = tokens as f32 / context_size as f32 * 100.0;
+
+            tooltip(
+                led,
+                text!(
+                    "{} / {} ({percent:.1}%)",
+                    thousands(tokens),
+                    thousands(context_size)
+                )
+                .size(SMALL),
+                tooltip::Position::Top,
+            )
+            .style(container::rounded_box)
+            .into()
+        }
+        _ => led.into(),
+    }
+}
+
+fn thousands(value: u64) -> String {
+    let digits = value.to_string();
+    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
+
+    for (index, digit) in digits.char_indices() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            formatted.push(',');
+        }
+
+        formatted.push(digit);
+    }
+
+    formatted
 }
