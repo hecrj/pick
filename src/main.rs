@@ -395,24 +395,32 @@ impl Pick {
 
                         Task::none()
                     }
-                    reason::Delta::ToolCallAdded(call) => {
-                        let last_call = reply.tool_calls.last().cloned();
-                        reply.tool_calls.push(call);
+                    reason::Delta::ToolCallsChanged(deltas) => {
+                        let mut calls = Vec::new();
 
-                        let Some(call) = last_call else {
-                            return Task::none();
-                        };
+                        for delta in deltas {
+                            match delta {
+                                reason::tool::Delta::CallAdded(call) => {
+                                    let last_call = reply.tool_calls.last().cloned();
+                                    reply.tool_calls.push(call);
 
-                        self.run(call)
-                    }
-                    reason::Delta::ArgumentsChanged(delta) => {
-                        let Some(tool_call) = reply.tool_calls.last_mut() else {
-                            return Task::none();
-                        };
+                                    let Some(call) = last_call else {
+                                        continue;
+                                    };
 
-                        tool_call.arguments.push_str(&delta);
+                                    calls.push(call);
+                                }
+                                reason::tool::Delta::ArgumentsChanged(delta) => {
+                                    let Some(tool_call) = reply.tool_calls.last_mut() else {
+                                        continue;
+                                    };
 
-                        Task::none()
+                                    tool_call.arguments.push_str(&delta);
+                                }
+                            }
+                        }
+
+                        Task::batch(calls.into_iter().map(|call| self.run(call)))
                     }
                 };
 
