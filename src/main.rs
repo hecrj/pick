@@ -805,8 +805,8 @@ fn context_led<'a>(
                                 0.8..0.9 => palette.warning.base.color,
                                 _ => palette.danger.base.color,
                             }),
-                            width: STROKE_WIDTH + 1.0,
-                            line_cap: canvas::LineCap::Round,
+                            width: STROKE_WIDTH,
+                            line_cap: canvas::LineCap::Square,
                             ..canvas::Stroke::default()
                         },
                     );
