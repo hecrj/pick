@@ -81,9 +81,11 @@ impl Item {
             Item::Assistant(reply) => {
                 let reasoning = if !reply.reasoning.raw.is_empty() {
                     Some(
-                        container(reply.reasoning.view()).style(|theme| container::Style {
-                            text_color: Some(theme.palette().secondary.strong.color),
-                            ..container::transparent(theme)
+                        container(reply.reasoning.view(Font::MONOSPACE)).style(|theme| {
+                            container::Style {
+                                text_color: Some(theme.palette().secondary.strong.color),
+                                ..container::transparent(theme)
+                            }
                         }),
                     )
                 } else {
@@ -110,13 +112,13 @@ impl Item {
                 column![
                     prompt_progress,
                     reasoning,
-                    (!reply.content.raw.is_empty()).then(|| reply.content.view()),
+                    (!reply.content.raw.is_empty()).then(|| reply.content.view(Font::DEFAULT)),
                 ]
                 .spacing(10)
                 .into()
             }
             Item::User(message) => right(
-                container(message.view())
+                container(message.view(Font::DEFAULT))
                     .padding(10)
                     .style(container::rounded_box),
             )
@@ -205,13 +207,13 @@ impl Markdown {
         self.content.push_str(delta);
     }
 
-    fn view(&self) -> Element<'_, Message> {
+    fn view(&self, font: Font) -> Element<'_, Message> {
         markdown(
             self.content.items(),
             markdown::Settings::with_text_size(
                 16,
                 markdown::Style {
-                    font: Font::MONOSPACE,
+                    font,
                     ..markdown::Style::from_palette(Theme::CatppuccinMocha.seed())
                 },
             ),
