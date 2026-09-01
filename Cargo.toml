@@ -20,6 +20,7 @@ function = "0.3"
 log = "0.4"
 reason = "0.2.0-dev"
 serde_json = "1"
+similar = "3"
 
 [lints.clippy]
 large-enum-variant = "allow"
