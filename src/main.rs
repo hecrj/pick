@@ -353,7 +353,7 @@ impl Pick {
                 self.input = text_editor::Content::new();
                 self.messages.push(Item::User(Markdown::new(message)));
 
-                if self.tasks.is_empty() {
+                let work = if self.tasks.is_empty() {
                     self.work()
                 } else {
                     self.tasks.clear();
@@ -363,7 +363,9 @@ impl Pick {
                     Task::future(tokio::time::sleep(time::seconds(2)))
                         .discard()
                         .chain(self.work())
-                }
+                };
+
+                Task::batch([work, operation::snap_to_end("scroll")])
             }
             Message::ReplyProgressed(event) => {
                 let Some(Item::Assistant(reply)) = self
