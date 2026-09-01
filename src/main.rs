@@ -2,6 +2,7 @@ mod tool;
 
 use crate::tool::Tool;
 
+use iced::border;
 use iced::keyboard;
 use iced::padding;
 use iced::task;
@@ -11,7 +12,7 @@ use iced::widget::{
     bottom, center, center_x, column, container, markdown, progress_bar, right, row, scrollable,
     sensor, space, stack, text, text_editor,
 };
-use iced::{Center, Element, Fill, Fit, Font, Size, Subscription, Task, Theme};
+use iced::{Center, Element, Fill, Fit, Font, Size, Subscription, Task, Theme, never};
 
 use function::Binary;
 use reason::Reason;
@@ -120,47 +121,67 @@ impl Item {
                     .style(container::rounded_box),
             )
             .into(),
-            Item::Tool(tool) => container(
-                column![
-                    text!(
-                        "{name}({arguments})",
-                        name = tool.call.name,
-                        arguments = tool.call.arguments
-                    )
-                    .size(SMALL),
-                    container(tool.status.content().map(|content| {
+            Item::Tool(tool) => {
+                let header = {
+                    let label = container(text(&tool.call.name).size(SMALL))
+                        .padding([2, 5])
+                        .style(|theme| container::dark(theme).border(border::rounded(5)));
+
+                    let title = tool
+                        .state
+                        .as_ref()
+                        .ok()
+                        .and_then(|state| Some(text(state.title()?).size(SMALL)));
+
+                    row![label, title].spacing(10).align_y(Center)
+                };
+
+                let arguments = match &tool.state {
+                    Ok(state) => state.view().map(|state| state.map(never)),
+                    Err(error) => Some(text!("{error}").size(SMALL).style(text::danger).into()),
+                };
+
+                let output = tool.status.content().map(|content| {
+                    let content = content.trim();
+
+                    container(
                         if content.len() > 50 {
                             text(format!(
                                 "{}...",
                                 &content[0..content.floor_char_boundary(50)]
                             ))
                         } else {
-                            text(content)
+                            text(if content.is_empty() {
+                                "[No output]"
+                            } else {
+                                content
+                            })
                         }
-                        .size(SMALL)
-                    }))
+                        .size(SMALL),
+                    )
                     .width(Fill)
                     .padding(10)
-                    .style(container::dark)
-                ]
-                .spacing(10),
-            )
-            .width(Fill)
-            .padding(10)
-            .style(|theme: &Theme| {
-                let palette = theme.seed();
+                    .style(|theme: &Theme| {
+                        let palette = theme.seed();
 
-                let color = match tool.status {
-                    Status::Running => palette.warning,
-                    Status::Success(_) => palette.success.scale_alpha(0.5),
-                    Status::Error(_) => palette.danger,
-                };
+                        let color = match tool.status {
+                            Status::Running => palette.warning,
+                            Status::Success(_) => palette.success.scale_alpha(0.5),
+                            Status::Invalid | Status::Error(_) => palette.danger,
+                        };
 
-                let mut style = container::bordered_box(theme);
-                style.border = style.border.color(color);
-                style
-            })
-            .into(),
+                        let mut style = container::dark(theme);
+                        style.border = style.border.color(color).width(1);
+                        style
+                    })
+                });
+
+                container(column![header, arguments, output].spacing(10))
+                    .width(Fill)
+                    .padding(10)
+                    .style(container::bordered_box)
+                    .into()
+            }
         }
     }
 }
@@ -208,14 +229,15 @@ struct Reply {
     timings: Option<reason::Timings>,
 }
 
-#[derive(Debug)]
 struct ToolRun {
     call: reason::tool::Call,
+    state: Result<Box<dyn tool::Call>, reason::Error>,
     status: Status,
 }
 
 #[derive(Debug)]
 enum Status {
+    Invalid,
     Running,
     Success(String),
     Error(String),
@@ -224,7 +246,7 @@ enum Status {
 impl Status {
     fn content(&self) -> Option<&str> {
         match self {
-            Status::Running => None,
+            Status::Invalid | Status::Running => None,
             Status::Success(output) | Status::Error(output) => Some(output.as_str()),
         }
     }
@@ -535,25 +557,31 @@ impl Pick {
     }
 
     fn run(&mut self, call: reason::tool::Call) -> Task<Message> {
-        let (run, handle) = Task::perform(
-            match self.tools.get(call.name.as_str()) {
-                Some(tool) => tool.run(&self.project, &call.arguments),
-                None => {
-                    let name = call.name.clone();
+        let state = match self.tools.get(call.name.as_str()) {
+            Some(tool) => tool.parse(&call.arguments),
+            None => {
+                Err(std::io::Error::other(format!("unknown tool: {name}", name = call.name)).into())
+            }
+        };
 
-                    Box::pin(
-                        async move { Err(std::io::Error::other(format!("unknown tool: {name}")))? },
-                    )
-                }
-            },
-            Message::ToolFinished.with(call.id.clone()),
-        )
-        .abortable();
+        let (run, status) = match &state {
+            Ok(state) => {
+                let future = state.run(&self.project);
 
-        self.tasks.insert(Work::Tool(call.id.clone()), handle);
+                let (run, handle) =
+                    Task::perform(future, Message::ToolFinished.with(call.id.clone())).abortable();
+
+                self.tasks.insert(Work::Tool(call.id.clone()), handle);
+
+                (run, Status::Running)
+            }
+            Err(_error) => (Task::none(), Status::Invalid),
+        };
+
         self.messages.push(Item::Tool(ToolRun {
             call,
-            status: Status::Running,
+            state,
+            status,
         }));
 
         run

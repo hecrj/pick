@@ -1,287 +1,48 @@
-use serde::Deserialize;
-use serde::de::DeserializeOwned;
-use tokio::io::AsyncReadExt;
+pub mod bash;
+pub mod edit;
+pub mod read;
+pub mod write;
 
+use bash::Bash;
+use edit::Edit;
+use read::Read;
+use write::Write;
+
+use iced::{Element, Never};
+
+use serde::de::DeserializeOwned;
+
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
 use std::pin::Pin;
 
-type Result = ::core::result::Result<String, reason::Error>;
-type Future = Pin<Box<dyn std::future::Future<Output = Result> + Send>>;
+type Output = ::core::result::Result<String, reason::Error>;
+pub type Future = Pin<Box<dyn std::future::Future<Output = Output> + Send>>;
 
 pub struct Tool {
     name: &'static str,
     description: &'static str,
     parameters: &'static [Parameter],
-    run: Box<dyn Fn(&Path, &str) -> Future>,
+    parse: Box<dyn Fn(&str) -> Result<Box<dyn Call>, reason::Error>>,
+}
+
+pub trait Call {
+    fn run(&self, project: &Path) -> Future;
+
+    fn title(&self) -> Option<Cow<'_, str>> {
+        None
+    }
+
+    fn view(&self) -> Option<Element<'_, Never>> {
+        None
+    }
 }
 
 impl Tool {
     pub fn builtins() -> HashMap<&'static str, Self> {
-        const READ_CHUNK_SIZE: usize = 64 * 1024;
-        const DEFAULT_READ_LIMIT: u64 = 1_000;
-        const MAX_READ_LIMIT: u64 = 10_000;
-        const MAX_READ_BYTES: u64 = 50 * 1024;
-
-        #[derive(Deserialize)]
-        struct Bash {
-            command: String,
-        }
-
-        fn bash(project: &Path, arguments: Bash) -> Future {
-            let project = project.to_path_buf();
-
-            Box::pin(async move {
-                let command = format!("exec 2>&1; {}", arguments.command);
-
-                let output = tokio::process::Command::new("bash")
-                    .args(["-c", &command])
-                    .current_dir(project)
-                    .output()
-                    .await?;
-
-                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-
-                if output.status.success() {
-                    Ok(stdout)
-                } else {
-                    Err(std::io::Error::other(format!(
-                        "{status}\n{stdout}",
-                        status = output.status
-                    )))?
-                }
-            })
-        }
-
-        #[derive(Deserialize)]
-        struct Read {
-            path: String,
-            #[serde(default)]
-            offset: Option<u64>,
-            #[serde(default)]
-            limit: Option<u64>,
-        }
-
-        fn read(project: &Path, arguments: Read) -> Future {
-            let project = project.to_path_buf();
-
-            Box::pin(async move {
-                let offset = match arguments.offset {
-                    Some(offset) if offset > 0 => offset,
-                    Some(_) => Err(std::io::Error::other(
-                        "offset must be a 1-based line number (>= 1)",
-                    ))?,
-                    None => 1,
-                };
-
-                let limit = match arguments.limit {
-                    Some(limit) if limit > 0 => limit.min(MAX_READ_LIMIT),
-                    Some(_) => Err(std::io::Error::other("limit must be >= 1"))?,
-                    None => DEFAULT_READ_LIMIT,
-                };
-
-                let path = project.join(&arguments.path);
-                let mut file = tokio::fs::File::open(&path).await?;
-
-                #[derive(Debug, PartialEq)]
-                enum Stop {
-                    EndOfFile,
-                    LineLimit { has_more: bool },
-                    ByteLimit,
-                }
-
-                let mut stop = Stop::EndOfFile;
-                let mut chunk = vec![0u8; READ_CHUNK_SIZE];
-                let mut scanned = 0u64;
-                let mut terminated_lines = 0u64;
-                let mut emitted = 0u64;
-                let mut pending = Vec::new();
-                let mut output = String::new();
-
-                loop {
-                    let n = file.read(&mut chunk).await?;
-
-                    if n == 0 {
-                        break;
-                    }
-
-                    scanned += n as u64;
-
-                    for &byte in &chunk[..n] {
-                        if byte == b'\n' {
-                            terminated_lines += 1;
-
-                            if terminated_lines >= offset {
-                                if pending.last() == Some(&b'\r') {
-                                    pending.pop();
-                                }
-
-                                output.push_str(&String::from_utf8_lossy(&pending));
-                                output.push('\n');
-                                emitted += 1;
-                            }
-
-                            pending.clear();
-                        } else {
-                            pending.push(byte);
-                        }
-
-                        if emitted == limit {
-                            break;
-                        }
-                    }
-
-                    if emitted == limit {
-                        // Peek one more chunk to see whether the file continues.
-                        stop = Stop::LineLimit {
-                            has_more: file.read(&mut chunk).await? > 0,
-                        };
-
-                        break;
-                    }
-
-                    if scanned >= MAX_READ_BYTES {
-                        stop = Stop::ByteLimit;
-
-                        break;
-                    }
-                }
-
-                // A final line may not end with a newline.
-                if matches!(stop, Stop::EndOfFile) && !pending.is_empty() {
-                    if pending.last() == Some(&b'\r') {
-                        pending.pop();
-                    }
-
-                    if terminated_lines + 1 >= offset {
-                        output.push_str(&String::from_utf8_lossy(&pending));
-                        output.push('\n');
-                        emitted += 1;
-                    }
-
-                    terminated_lines += 1;
-                }
-
-                if output.is_empty() && matches!(stop, Stop::EndOfFile) {
-                    return Ok(if terminated_lines == 0 {
-                        "File is empty.".to_owned()
-                    } else {
-                        format!(
-                            "File has {} line{}; offset {} is past the end.",
-                            terminated_lines,
-                            if terminated_lines == 1 { "" } else { "s" },
-                            offset
-                        )
-                    });
-                }
-
-                if output.is_empty() {
-                    return Ok(format!(
-                        "No complete lines could be read within the {MAX_READ_BYTES} byte budget; the file's lines may be very long."
-                    ));
-                }
-
-                match stop {
-                    Stop::EndOfFile => Ok(output),
-                    Stop::LineLimit { has_more } => {
-                        if has_more {
-                            Ok(format!(
-                                "{output}\n[File has more lines; continue reading with offset={}]",
-                                offset + emitted
-                            ))
-                        } else {
-                            Ok(output)
-                        }
-                    }
-                    Stop::ByteLimit => Ok(format!(
-                        "{output}\n[Read stopped after scanning {MAX_READ_BYTES} bytes; some lines may be very long. Try a smaller limit or use bash to inspect the file.]"
-                    )),
-                }
-            })
-        }
-
-        #[derive(Deserialize)]
-        struct Write {
-            path: String,
-            content: String,
-        }
-
-        fn write(project: &Path, arguments: Write) -> Future {
-            let project = project.to_path_buf();
-
-            Box::pin(async move {
-                let path = project.join(&arguments.path);
-
-                tokio::fs::write(&path, arguments.content).await?;
-
-                Ok(format!("Wrote to {}", path.display()))
-            })
-        }
-
-        #[derive(Deserialize)]
-        struct Edit {
-            path: String,
-            old_string: String,
-            new_string: String,
-            #[serde(default)]
-            replace_all: bool,
-        }
-
-        fn edit(project: &Path, arguments: Edit) -> Future {
-            let project = project.to_path_buf();
-
-            Box::pin(async move {
-                let path = project.join(&arguments.path);
-                let contents = tokio::fs::read_to_string(&path).await?;
-
-                if arguments.old_string.is_empty() {
-                    Err(std::io::Error::other("old_string must not be empty"))?
-                }
-
-                if arguments.old_string == arguments.new_string {
-                    Err(std::io::Error::other(
-                        "old_string and new_string must be different",
-                    ))?
-                }
-
-                let occurrences = contents.matches(&arguments.old_string).count();
-
-                if occurrences == 0 {
-                    Err(std::io::Error::other(format!(
-                        "old_string not found in {}",
-                        path.display()
-                    )))?
-                }
-
-                if occurrences > 1 && !arguments.replace_all {
-                    Err(std::io::Error::other(format!(
-                        "old_string matches {occurrences} locations in {}; include more context to make it unique, or set replace_all to true",
-                        path.display()
-                    )))?
-                }
-
-                let updated = if arguments.replace_all {
-                    contents.replace(&arguments.old_string, &arguments.new_string)
-                } else {
-                    contents.replacen(&arguments.old_string, &arguments.new_string, 1)
-                };
-
-                tokio::fs::write(&path, updated).await?;
-
-                if arguments.replace_all {
-                    Ok(format!(
-                        "Edited {} ({} replacements)",
-                        path.display(),
-                        occurrences
-                    ))
-                } else {
-                    Ok(format!("Edited {} (1 replacement)", path.display()))
-                }
-            })
-        }
-
         let tools = [
-            Self::new(
+            Self::new::<Read>(
                 "read",
                 "Read file contents",
                 &[
@@ -304,9 +65,8 @@ impl Tool {
                         required: false,
                     },
                 ],
-                read,
             ),
-            Self::new(
+            Self::new::<Bash>(
                 "bash",
                 "Run a bash command",
                 &[Parameter {
@@ -315,9 +75,8 @@ impl Tool {
                     schema: Schema::String,
                     required: true,
                 }],
-                bash,
             ),
-            Self::new(
+            Self::new::<Write>(
                 "write",
                 "Write file contents",
                 &[
@@ -334,9 +93,8 @@ impl Tool {
                         required: true,
                     },
                 ],
-                write,
             ),
-            Self::new(
+            Self::new::<Edit>(
                 "edit",
                 "Edit a file by replacing an exact string match. \
                 old_string must match exactly one location in the file, \
@@ -367,15 +125,14 @@ impl Tool {
                         required: false,
                     },
                 ],
-                edit,
             ),
         ];
 
         HashMap::from_iter(tools.into_iter().map(|tool| (tool.name, tool)))
     }
 
-    pub fn run(&self, project: impl AsRef<Path>, arguments: &str) -> Future {
-        (self.run)(project.as_ref(), arguments)
+    pub fn parse(&self, arguments: &str) -> Result<Box<dyn Call>, reason::Error> {
+        (self.parse)(arguments)
     }
 
     pub fn to_metadata(&self) -> reason::Tool {
@@ -416,30 +173,25 @@ impl Tool {
         }
     }
 
-    fn new<Arguments: DeserializeOwned + 'static>(
+    fn new<C: Call + DeserializeOwned + 'static>(
         name: &'static str,
         description: &'static str,
         parameters: &'static [Parameter],
-        run: fn(&Path, Arguments) -> Future,
     ) -> Self {
         Self {
             name,
             description,
             parameters,
-            run: Box::new(
-                move |project, json| match serde_json::from_str::<Arguments>(json) {
-                    Ok(arguments) => run(project, arguments),
-                    Err(error) => {
-                        log::error!("tool arguments failed to parse: {error}");
+            parse: Box::new(move |json| match serde_json::from_str::<C>(json) {
+                Ok(call) => Ok(Box::new(call)),
+                Err(error) => {
+                    log::error!("tool arguments failed to parse: {error}");
 
-                        Box::pin(async move {
-                            Err(std::io::Error::other(format!(
-                                "tool arguments failed to parse: {error}"
-                            )))?
-                        })
-                    }
-                },
-            ),
+                    Err(std::io::Error::other(format!(
+                        "tool arguments failed to parse: {error}"
+                    )))?
+                }
+            }),
         }
     }
 }
