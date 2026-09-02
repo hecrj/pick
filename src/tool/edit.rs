@@ -1,4 +1,5 @@
 use super::{Call, Future};
+use crate::file;
 
 use iced::border;
 use iced::widget::text;
@@ -91,6 +92,7 @@ impl Call for Edit {
 
         Box::pin(async move {
             let path = project.join(&path);
+            let _lock = file::lock(&path).await;
             let contents = tokio::fs::read_to_string(&path).await?;
 
             if old_string.is_empty() {

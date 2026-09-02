@@ -1,4 +1,5 @@
 use super::{Call, Future};
+use crate::file;
 
 use iced::widget::text;
 use iced::{Element, Never};
@@ -34,6 +35,7 @@ impl Call for Write {
 
         Box::pin(async move {
             let path = project.join(&path);
+            let _lock = file::lock(&path).await;
 
             tokio::fs::write(&path, content).await?;
 

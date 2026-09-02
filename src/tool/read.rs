@@ -1,4 +1,5 @@
 use super::{Call, Future};
+use crate::file;
 
 use serde::Deserialize;
 use tokio::io::AsyncReadExt;
@@ -54,6 +55,7 @@ impl Call for Read {
             };
 
             let path = project.join(&path);
+            let _lock = file::lock(&path).await;
             let mut file = tokio::fs::File::open(&path).await?;
 
             #[derive(Debug, PartialEq)]

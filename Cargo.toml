@@ -14,7 +14,7 @@ similar.version = "3"
 similar.features = ["inline"]
 
 tokio.version = "1"
-tokio.features = ["fs"]
+tokio.features = ["fs", "macros", "test-util"]
 
 tracing-subscriber.version = "0.3"
 tracing-subscriber.features = ["tracing-log"]
