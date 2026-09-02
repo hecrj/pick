@@ -3,7 +3,6 @@ mod tool;
 
 use crate::tool::Tool;
 
-use iced::border;
 use iced::keyboard;
 use iced::padding;
 use iced::task;
@@ -128,7 +127,7 @@ impl Item {
                 let header = {
                     let label = container(text(&tool.call.name).size(SMALL))
                         .padding([2, 5])
-                        .style(|theme| container::dark(theme).border(border::rounded(5)));
+                        .style(container::dark);
 
                     let title = tool
                         .state
