@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 iced.version = "0.15.0-dev"
-iced.features = ["tokio", "sipper", "markdown", "canvas"]
+iced.features = ["tokio", "sipper", "markdown", "canvas", "highlighter"]
 
 serde.version = "1"
 serde.features = ["derive"]
@@ -30,9 +30,10 @@ type-complexity = "allow"
 
 [patch.crates-io]
 iced.git = "https://github.com/iced-rs/iced.git"
-iced.rev = "f8127c84dddf0b9e32c5e7dbb822911652f72665"
+iced.rev = "ce598e363fada1ca9ca66c8c9f837aa9c311c45e"
 
 reason.git = "https://github.com/hecrj/reason.git"
 reason.rev = "4d886f59d24318bebc912133f012c15a2fda8ec3"
 
+# iced.path = "../iced"
 # reason.path = "../reason"

@@ -1,15 +1,18 @@
 use super::{Call, Future};
 use crate::file;
+use crate::highlight;
 
 use iced::border;
+use iced::highlighter;
 use iced::widget::text;
 use iced::widget::{column, container, rich_text, scrollable, span};
-use iced::{Color, Element, Fill, Fit, Never, Theme};
+use iced::{Color, Element, Fill, Fit, Highlighter, Never, Theme};
 
 use serde::Deserialize;
 use similar::{ChangeTag, InlineChangeOptions, TextDiff};
 
 use std::borrow::Cow;
+use std::ops::Range;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -41,7 +44,7 @@ impl From<Arguments> for Edit {
             replace_all,
         }: Arguments,
     ) -> Self {
-        let diff = Line::diff(&old_string, &new_string);
+        let diff = Line::diff(&path, &old_string, &new_string);
 
         Self {
             path,
@@ -144,7 +147,7 @@ impl Call for Edit {
 
 /// The total time budget for refining intraline changes.
 const INLINE_DEADLINE: Duration = Duration::from_millis(10);
-const BACKGROUND_ALPHA: f32 = 0.15;
+const BACKGROUND_ALPHA: f32 = 0.10;
 const HIGHLIGHT_ALPHA: f32 = BACKGROUND_ALPHA * 2.0;
 
 /// A line of the edit diff.
@@ -156,30 +159,58 @@ struct Line {
 }
 
 impl Line {
-    fn diff(old: &str, new: &str) -> Vec<Self> {
-        let (added, removed) = Self::colors(&Theme::CatppuccinMocha); // TODO: Pass `Theme` as argument
-
+    fn diff(path: &str, old: &str, new: &str) -> Vec<Self> {
+        let palette = Self::palette(&Theme::CatppuccinMocha); // TODO: Pass `Theme` as argument
         let diff = TextDiff::from_lines(old, new);
         let options = InlineChangeOptions::default();
         let deadline = Some(Instant::now() + INLINE_DEADLINE);
 
+        let settings = highlighter::Settings {
+            token: highlight::token(path),
+        };
+
+        let mut old_highlighter = Highlighter::new(&settings);
+        let mut new_highlighter = Highlighter::new(&settings);
+
         diff.iter_all_inline_changes_with_options_deadline(options, deadline)
             .map(|change| {
                 let (prefix, style) = match change.tag() {
-                    ChangeTag::Insert => ('+', Some(added)),
-                    ChangeTag::Delete => ('-', Some(removed)),
+                    ChangeTag::Insert => ('+', Some(palette.added)),
+                    ChangeTag::Delete => ('-', Some(palette.removed)),
                     ChangeTag::Equal => (' ', None),
                 };
 
-                Line::new(prefix, style, change.values().iter().copied())
+                let line: String = change.values().iter().map(|&(_, value)| value).collect();
+
+                let scopes = match change.tag() {
+                    ChangeTag::Insert => new_highlighter.highlight_line(&line),
+                    ChangeTag::Delete => old_highlighter.highlight_line(&line),
+                    ChangeTag::Equal => {
+                        // The scopes are discarded, but the iterator must be
+                        // consumed: the old highlighter's state only
+                        // advances as the line is highlighted.
+                        old_highlighter.highlight_line(&line).for_each(|_| {});
+                        new_highlighter.highlight_line(&line)
+                    }
+                };
+
+                Line::new(
+                    prefix,
+                    &line,
+                    style,
+                    change.values().iter().copied(),
+                    scopes,
+                )
             })
             .collect()
     }
 
     fn new<'a>(
         prefix: char,
+        line: &str,
         style: Option<Color>,
         values: impl IntoIterator<Item = (bool, &'a str)>,
+        scopes: impl IntoIterator<Item = (Range<usize>, highlighter::Scope)>,
     ) -> Self {
         let background = style
             .map(|color| color.scale_alpha(BACKGROUND_ALPHA))
@@ -187,66 +218,120 @@ impl Line {
 
         let mut spans = vec![span(format!("{prefix} "))];
 
-        // Merge the contiguous values of each emphasis into a single
-        // segment as we go, looking ahead with `peek` to tell when the
-        // current run ends.
-        let mut values = values.into_iter().peekable();
+        // Every line renders in its own `container`, so the terminator
+        // is dropped from the end of the line, terminated or not.
+        let mut end = line.len();
 
-        while let Some((emphasized, value)) = values.next() {
-            let mut segment = String::new();
-            segment.push_str(value);
+        if line.ends_with('\n') {
+            end -= '\n'.len_utf8();
 
-            // Every line renders in its own `container`, so the
-            // terminator is dropped from the content of the last
-            // segment, terminated or not.
-            if values.peek().is_none() && segment.ends_with('\n') {
-                segment.pop();
+            if line[..end].ends_with('\r') {
+                end -= '\r'.len_utf8();
+            }
+        }
 
-                if segment.ends_with('\r') {
-                    segment.pop();
+        // The scopes partition the line from zero to its end, so a
+        // single cursor walks the segments and the scopes, cutting
+        // them at `end`.
+        let mut position = 0;
+        let mut values = values.into_iter();
+        let mut scopes = scopes.into_iter();
+        let (mut range, mut scope) = scopes.next().expect("scope must exist");
+
+        let highlight = style.map(|color| color.scale_alpha(HIGHLIGHT_ALPHA));
+
+        while let Some((emphasized, mut value)) = values.next() {
+            if let Some(highlight) = highlight
+                && emphasized
+            {
+                let mut total = value.len();
+                let mut is_over = true;
+
+                // Unify all emphasized ranges
+                for (emphasized, other) in values.by_ref() {
+                    if !emphasized {
+                        value = other;
+                        is_over = false;
+                        break;
+                    }
+
+                    total += other.len();
+                }
+
+                spans.push(
+                    span(&line[position..position + total])
+                        .background(highlight)
+                        .border(border::rounded(2))
+                        .to_static(),
+                );
+
+                position += total;
+
+                if is_over {
+                    break;
+                }
+
+                while range.end <= position {
+                    (range, scope) = scopes.next().expect("scope must exist");
                 }
             }
 
-            // The dropped terminator may leave the last segment empty,
-            // and an empty span would render nothing anyway.
-            if segment.is_empty() {
-                continue;
-            }
+            let stop = end.min(position + value.len());
 
-            spans.push(if emphasized && let Some(color) = style {
-                span(segment)
-                    .background(color.scale_alpha(HIGHLIGHT_ALPHA))
-                    .border(border::rounded(2))
-            } else {
-                span(segment)
-            });
+            while position < stop {
+                let stop = stop.min(range.end);
+                let span = highlight::span(line, position..stop, scope);
+
+                spans.push(span);
+
+                if range.end <= position {
+                    (range, scope) = scopes.next().expect("scope must exist");
+                }
+
+                position = stop;
+            }
         }
 
         Self { background, spans }
     }
 
-    fn colors(theme: &Theme) -> (Color, Color) {
+    fn palette(theme: &Theme) -> Palette {
         let palette = theme.seed();
 
-        (palette.success, palette.danger)
+        Palette {
+            added: palette.success,
+            removed: palette.danger,
+        }
     }
+}
+
+struct Palette {
+    added: Color,
+    removed: Color,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The joined text of the spans of a line.
+    fn text_of(line: &Line) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.text.to_string())
+            .collect()
+    }
+
     #[test]
     fn parses_arguments_and_caches_diff() {
-        let edit: Edit = serde_json::from_str(
-            r#"{"path":"src/main.rs","old_string":"a\nb","new_string":"a\nc"}"#,
-        )
-        .unwrap();
+        let edit: Edit =
+            serde_json::from_str(r#"{"path":"README","old_string":"a\nb","new_string":"a\nc"}"#)
+                .unwrap();
 
-        assert_eq!(edit.path, "src/main.rs");
+        assert_eq!(edit.path, "README");
         assert!(!edit.replace_all);
 
-        let (added, removed) = Line::colors(&Theme::CatppuccinMocha);
+        let palette = Line::palette(&Theme::CatppuccinMocha);
 
         let [context_line, removed_line, added_line] = &edit.diff[..] else {
             unreachable!()
@@ -258,13 +343,15 @@ mod tests {
         assert_eq!(context_line.background, Color::TRANSPARENT);
         assert_eq!(
             removed_line.background,
-            removed.scale_alpha(BACKGROUND_ALPHA)
+            palette.removed.scale_alpha(BACKGROUND_ALPHA)
         );
-        assert_eq!(added_line.background, added.scale_alpha(BACKGROUND_ALPHA));
+        assert_eq!(
+            added_line.background,
+            palette.added.scale_alpha(BACKGROUND_ALPHA)
+        );
 
-        // The spans of a line are only used for the inline highlights,
-        // so a line without intraline changes is rendered with plain
-        // spans.
+        // Without a grammar for the path and without intraline
+        // changes, the lines render with plain spans.
         for line in [context_line, removed_line, added_line] {
             for span in &line.spans {
                 assert!(span.color.is_none());
@@ -272,14 +359,14 @@ mod tests {
             }
         }
 
-        assert_eq!(context_line.spans.last().unwrap().text, "a");
-        assert_eq!(removed_line.spans.last().unwrap().text, "b");
-        assert_eq!(added_line.spans.last().unwrap().text, "c");
+        assert_eq!(text_of(context_line), "  a");
+        assert_eq!(text_of(removed_line), "- b");
+        assert_eq!(text_of(added_line), "+ c");
     }
 
     #[test]
     fn highlights_intraline_changes() {
-        let (added, removed) = Line::colors(&Theme::CatppuccinMocha);
+        let palette = Line::palette(&Theme::CatppuccinMocha);
 
         let edit: Edit = serde_json::from_str(
             r#"{"path":"src/main.rs","old_string":"let x = 1\n","new_string":"let x = 2\n"}"#,
@@ -292,53 +379,135 @@ mod tests {
 
         assert_eq!(
             removed_line.background,
-            removed.scale_alpha(BACKGROUND_ALPHA)
+            palette.removed.scale_alpha(BACKGROUND_ALPHA)
         );
-        assert_eq!(added_line.background, added.scale_alpha(BACKGROUND_ALPHA));
+        assert_eq!(
+            added_line.background,
+            palette.added.scale_alpha(BACKGROUND_ALPHA)
+        );
 
-        let [removed_prefix, removed_context, removed_change] = &removed_line.spans[..] else {
+        // The `+`/`-` markers stay plain; the color of the line is
+        // carried by its background instead.
+        let prefix = &removed_line.spans[0];
+        assert_eq!(prefix.text.as_ref(), "- ");
+        assert!(prefix.color.is_none());
+        assert!(prefix.highlight.is_none());
+
+        // The unchanged parts of the line are syntax-highlighted, but
+        // never emphasized.
+        assert!(removed_line.spans.iter().any(|span| {
+            span.text.as_ref() == "let"
+                && span.color == Some(Theme::CatppuccinMocha.palette().primary.strong.color)
+                && span.highlight.is_none()
+        }));
+
+        // The changed character groups are highlighted on top of the
+        // syntax highlighting.
+        let changes: Vec<_> = removed_line
+            .spans
+            .iter()
+            .filter(|span| span.highlight.is_some())
+            .collect();
+
+        let [change] = &changes[..] else {
             unreachable!()
         };
 
-        // The `+`/`-` markers and the unchanged parts of the line stay
-        // plain; the color of the line is carried by its background
-        // instead.
-        assert_eq!(removed_prefix.text, "- ");
-        assert!(removed_prefix.color.is_none());
-        assert!(removed_prefix.highlight.is_none());
-
-        assert_eq!(removed_context.text, "let x = ");
-        assert!(removed_context.color.is_none());
-        assert!(removed_context.highlight.is_none());
-
-        // The changed character groups are highlighted.
-        assert_eq!(removed_change.text, "1");
-        assert_eq!(removed_change.color, None);
+        assert_eq!(change.text.as_ref(), "1");
+        assert_eq!(change.color, None);
         assert_eq!(
-            removed_change
-                .highlight
-                .map(|highlight| highlight.background),
-            Some(removed.scale_alpha(HIGHLIGHT_ALPHA).into())
+            change.highlight.map(|highlight| highlight.background),
+            Some(palette.removed.scale_alpha(HIGHLIGHT_ALPHA).into())
         );
 
-        let [added_prefix, added_context, added_change] = &added_line.spans[..] else {
+        assert_eq!(text_of(removed_line), "- let x = 1");
+        assert_eq!(text_of(added_line), "+ let x = 2");
+
+        let changes: Vec<_> = added_line
+            .spans
+            .iter()
+            .filter(|span| span.highlight.is_some())
+            .collect();
+
+        let [change] = &changes[..] else {
             unreachable!()
         };
 
-        assert_eq!(added_prefix.text, "+ ");
-        assert!(added_prefix.color.is_none());
-        assert!(added_prefix.highlight.is_none());
-
-        assert_eq!(added_context.text, "let x = ");
-        assert!(added_context.color.is_none());
-        assert!(added_context.highlight.is_none());
-
-        assert_eq!(added_change.text, "2");
-        assert_eq!(added_change.color, None);
+        assert_eq!(change.text.as_ref(), "2");
         assert_eq!(
-            added_change.highlight.map(|highlight| highlight.background),
-            Some(added.scale_alpha(HIGHLIGHT_ALPHA).into())
+            change.highlight.map(|highlight| highlight.background),
+            Some(palette.added.scale_alpha(HIGHLIGHT_ALPHA).into())
         );
+    }
+
+    #[test]
+    fn a_multi_line_diff_renders_a_line_per_file_line() {
+        let edit: Edit = serde_json::from_str(
+            r#"{"path":"a.txt","old_string":"a\nb\nc","new_string":"a\nx\ny\nz\nc"}"#,
+        )
+        .unwrap();
+
+        let [context, removed, added_1, added_2, added_3, tail] = &edit.diff[..] else {
+            unreachable!()
+        };
+
+        assert_eq!(text_of(context), "  a");
+        assert_eq!(text_of(removed), "- b");
+        assert_eq!(text_of(added_1), "+ x");
+        assert_eq!(text_of(added_2), "+ y");
+        assert_eq!(text_of(added_3), "+ z");
+        assert_eq!(text_of(tail), "  c");
+
+        // The terminators are dropped from the spans entirely.
+        for line in [context, removed, added_1, added_2, added_3, tail] {
+            for span in &line.spans {
+                assert!(!span.text.contains('\n'));
+            }
+        }
+    }
+
+    #[test]
+    fn an_inserted_line_is_highlighted_against_the_new_file() {
+        // The old line is an unterminated string, which would leave the
+        // parser inside a string if the diff were highlighted in a single
+        // pass. The inserted line must instead take the state of the new
+        // file, where `1` is a number, not a string.
+        let edit: Edit =
+            serde_json::from_str(r#"{"path":"a.py","old_string":"x = \"","new_string":"x = 1"}"#)
+                .unwrap();
+
+        let [_, added] = &edit.diff[..] else {
+            unreachable!()
+        };
+
+        let one = added
+            .spans
+            .iter()
+            .find(|span| span.text.as_ref() == "1")
+            .unwrap();
+
+        assert_eq!(one.color, None);
+    }
+
+    #[test]
+    fn a_line_is_highlighted_with_the_state_of_the_lines_before_it() {
+        // The lines in the middle of a multi-line string are only colored
+        // as string content if the parser state carries over from the
+        // line that opened the string.
+        let edit: Edit = serde_json::from_str(
+            r#"{"path":"a.py","old_string":"","new_string":"x = \"\"\"\nhello\nworld\n\"\"\""}"#,
+        )
+        .unwrap();
+
+        let [_, hello, world, _] = &edit.diff[..] else {
+            unreachable!()
+        };
+
+        let string = Theme::CatppuccinMocha.palette().success.base.color;
+
+        for line in [hello, world] {
+            assert!(line.spans.iter().any(|span| span.color == Some(string)));
+        }
     }
 
     #[test]
@@ -350,7 +519,7 @@ mod tests {
             ("foo 1\n", "foo 2\n"),
             ("foo 1\nbar\nbaz", "foo 2\nbar\nqux\n"),
         ] {
-            let lines = Line::diff(old, new);
+            let lines = Line::diff("README", old, new);
 
             for line in &lines {
                 for span in &line.spans {

@@ -1,8 +1,10 @@
 use super::{Call, Future};
 use crate::file;
+use crate::highlight;
 
-use iced::widget::{column, container, text};
-use iced::{Element, Fill, Never};
+use iced::highlighter;
+use iced::widget::{column, container, rich_text, span, text};
+use iced::{Element, Fill, Highlighter, Never};
 
 use serde::Deserialize;
 
@@ -32,7 +34,7 @@ struct Arguments {
 
 impl From<Arguments> for Write {
     fn from(Arguments { path, content }: Arguments) -> Self {
-        let preview = Preview::of(&content);
+        let preview = Preview::of(&path, &content);
 
         Self {
             path,
@@ -51,23 +53,23 @@ impl Call for Write {
         let preview = &self.preview;
 
         (!preview.lines.is_empty()).then(|| {
+            let notice = preview
+                .notice
+                .as_ref()
+                .map(|notice| text(notice).size(14).style(text::secondary));
+
             let lines = preview
                 .lines
                 .iter()
-                .map(|line| {
-                    Some(
-                        text(line)
-                            .size(14)
-                            .width(Fill)
-                            .wrapping(text::Wrapping::None)
-                            .ellipsis(text::Ellipsis::End),
-                    )
+                .map(|spans| {
+                    rich_text(spans.as_slice())
+                        .size(14)
+                        .width(Fill)
+                        .wrapping(text::Wrapping::None)
+                        .ellipsis(text::Ellipsis::End)
+                        .into()
                 })
-                .chain([preview
-                    .notice
-                    .as_ref()
-                    .map(|notice| text(notice).size(14).style(text::secondary))])
-                .map(Element::from);
+                .chain(notice.into_iter().map(Element::from));
 
             container(column(lines).width(Fill))
                 .width(Fill)
@@ -93,17 +95,22 @@ impl Call for Write {
     }
 }
 
-/// A bounded, line-based preview of the content of a write.
+/// A bounded, line-based preview of the content of a write,
+/// syntax-highlighted by the language of the path.
 struct Preview {
     /// The lines of the preview, each cut to `PREVIEW_LINE_WIDTH`.
-    lines: Vec<String>,
+    lines: Vec<Vec<text::Span<'static>>>,
     /// A notice of the full size of the content, present only when
     /// the preview is truncated.
     notice: Option<String>,
 }
 
 impl Preview {
-    fn of(content: &str) -> Self {
+    fn of(path: &str, content: &str) -> Self {
+        let mut highlighter = Highlighter::new(&highlighter::Settings {
+            token: highlight::token(path),
+        });
+
         let mut lines = Vec::new();
         let mut total = 0;
 
@@ -122,13 +129,16 @@ impl Preview {
                 cut = true;
             }
 
-            let mut preview_line = line.to_owned();
+            let mut spans: Vec<text::Span<'static>> = highlighter
+                .highlight_line(line)
+                .map(|(range, scope)| highlight::span(line, range, scope))
+                .collect();
 
             if cut {
-                preview_line.push('…');
+                spans.push(span("…"));
             }
 
-            lines.push(preview_line);
+            lines.push(spans);
         }
 
         let truncated = lines.len() < total;
@@ -143,6 +153,13 @@ impl Preview {
 #[cfg(test)]
 mod tests {
     use super::{PREVIEW_LINE_WIDTH, PREVIEW_LINES, Preview, Write};
+    use iced::Theme;
+    use iced::widget::text;
+
+    /// The joined text of the spans of a preview line.
+    fn text_of(spans: &[text::Span<'_>]) -> String {
+        spans.iter().map(|span| span.text.to_string()).collect()
+    }
 
     #[test]
     fn parses_arguments_and_caches_preview() {
@@ -150,22 +167,30 @@ mod tests {
 
         assert_eq!(write.path, "a.txt");
         assert_eq!(write.content, "a\nb\nc");
-        assert_eq!(write.preview.lines, ["a", "b", "c"]);
+
+        let lines: Vec<_> = write
+            .preview
+            .lines
+            .iter()
+            .map(|line| text_of(line))
+            .collect();
+        assert_eq!(lines, ["a", "b", "c"]);
         assert!(write.preview.notice.is_none());
     }
 
     #[test]
     fn short_content_is_previewed_in_full() {
-        let preview = Preview::of("a\nb\nc");
+        let preview = Preview::of("a.txt", "a\nb\nc");
 
-        assert_eq!(preview.lines, ["a", "b", "c"]);
+        let lines: Vec<_> = preview.lines.iter().map(|line| text_of(line)).collect();
+        assert_eq!(lines, ["a", "b", "c"]);
         assert!(preview.notice.is_none());
         assert!(!preview.lines.is_empty());
     }
 
     #[test]
     fn empty_content_has_no_preview() {
-        let preview = Preview::of("");
+        let preview = Preview::of("a.txt", "");
 
         assert!(preview.lines.is_empty());
         assert!(preview.notice.is_none());
@@ -178,10 +203,10 @@ mod tests {
             .map(|line| format!("line {line}\n"))
             .collect();
 
-        let preview = Preview::of(&content);
+        let preview = Preview::of("a.txt", &content);
 
         assert_eq!(preview.lines.len(), PREVIEW_LINES);
-        assert_eq!(preview.lines.first().unwrap(), "line 1");
+        assert_eq!(text_of(preview.lines.first().unwrap()), "line 1");
 
         // 7 bytes for `line 1` through `line 9`, 8 for the rest.
         let total_bytes = 9 * 7 + (total_lines - 9) * 8;
@@ -200,11 +225,13 @@ mod tests {
             "y".repeat(PREVIEW_LINE_WIDTH + 10)
         );
 
-        let preview = Preview::of(&content);
+        let preview = Preview::of("a.txt", &content);
 
         assert_eq!(preview.lines.len(), 2);
 
         for line in &preview.lines {
+            let line = text_of(line);
+
             assert_eq!(line.len(), PREVIEW_LINE_WIDTH + '…'.len_utf8());
             assert!(line.ends_with('…'));
         }
@@ -218,14 +245,42 @@ mod tests {
         // Each character is 3 bytes, so a cut at the byte budget
         // would land in the middle of one.
         let content = "中".repeat(PREVIEW_LINE_WIDTH / 3 + 10);
-        let preview = Preview::of(&content);
+        let preview = Preview::of("a.txt", &content);
 
         assert_eq!(preview.lines.len(), 1);
 
-        let line = preview.lines.first().unwrap();
+        let line = text_of(preview.lines.first().unwrap());
         let cut = &line[..line.len() - '…'.len_utf8()];
 
         assert!(line.ends_with('…'));
         assert!(cut.chars().all(|c| c == '中'));
+    }
+
+    #[test]
+    fn highlights_the_preview_with_the_language_of_the_path() {
+        let write: Write =
+            serde_json::from_str(r#"{"path":"a.rs","content":"let s = \"hi\";"}"#).unwrap();
+
+        let [line] = &write.preview.lines[..] else {
+            unreachable!()
+        };
+
+        // The keyword and the string literal take the colors of the
+        // theme, the rest of the line stays plain.
+        assert!(line.iter().any(|span| {
+            span.text.as_ref() == "let"
+                && span.color == Some(Theme::CatppuccinMocha.palette().primary.strong.color)
+        }));
+
+        assert!(line.iter().any(|span| {
+            span.text.as_ref() == "hi"
+                && span.color == Some(Theme::CatppuccinMocha.palette().success.base.color)
+        }));
+
+        let plain = line
+            .iter()
+            .find(|span| span.text.as_ref() == " s ")
+            .unwrap();
+        assert!(plain.color.is_none());
     }
 }

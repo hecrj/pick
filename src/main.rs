@@ -1,4 +1,5 @@
 mod file;
+mod highlight;
 mod tool;
 
 use crate::tool::Tool;
@@ -210,13 +211,11 @@ impl Markdown {
     fn view(&self, font: Font) -> Element<'_, Message> {
         markdown(
             self.content.items(),
-            markdown::Settings::with_text_size(
-                16,
-                markdown::Style {
-                    font,
-                    ..markdown::Style::from_palette(Theme::CatppuccinMocha.seed())
-                },
-            ),
+            markdown::Settings {
+                font,
+                ..markdown::Settings::default()
+            },
+            &Theme::CatppuccinMocha,
         )
         .map(Message::LinkClicked)
     }
