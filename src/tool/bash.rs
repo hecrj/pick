@@ -18,7 +18,7 @@ impl Call for Bash {
             container(text(&self.command).size(14))
                 .width(Fill)
                 .padding(10)
-                .style(container::rounded_box)
+                .style(container::dark)
                 .into(),
         )
     }

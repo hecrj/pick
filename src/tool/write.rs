@@ -1,8 +1,8 @@
 use super::{Call, Future};
 use crate::file;
 
-use iced::widget::text;
-use iced::{Element, Never};
+use iced::widget::{container, text};
+use iced::{Element, Fill, Never};
 
 use serde::Deserialize;
 
@@ -22,8 +22,10 @@ impl Call for Write {
 
     fn view(&self) -> Option<Element<'_, Never>> {
         Some(
-            text(&self.content[..self.content.floor_char_boundary(50)])
-                .size(14)
+            container(text(&self.content[..self.content.floor_char_boundary(50)]).size(14))
+                .width(Fill)
+                .padding(10)
+                .style(container::dark)
                 .into(),
         )
     }
