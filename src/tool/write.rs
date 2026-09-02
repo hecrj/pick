@@ -50,7 +50,7 @@ impl Call for Write {
     fn view(&self) -> Option<Element<'_, Never>> {
         let preview = &self.preview;
 
-        (!preview.is_empty()).then(|| {
+        (!preview.lines.is_empty()).then(|| {
             let lines = preview
                 .lines
                 .iter()
@@ -138,10 +138,6 @@ impl Preview {
             notice: truncated.then(|| format!("… ({total} lines, {} bytes total)", content.len())),
         }
     }
-
-    fn is_empty(&self) -> bool {
-        self.lines.is_empty()
-    }
 }
 
 #[cfg(test)]
@@ -164,14 +160,14 @@ mod tests {
 
         assert_eq!(preview.lines, ["a", "b", "c"]);
         assert!(preview.notice.is_none());
-        assert!(!preview.is_empty());
+        assert!(!preview.lines.is_empty());
     }
 
     #[test]
     fn empty_content_has_no_preview() {
         let preview = Preview::of("");
 
-        assert!(preview.is_empty());
+        assert!(preview.lines.is_empty());
         assert!(preview.notice.is_none());
     }
 
