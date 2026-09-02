@@ -28,6 +28,14 @@ pub struct Tool {
 }
 
 pub trait Call {
+    /// Executes the call and returns its result.
+    ///
+    /// The returned string is fed back to the model as the tool's
+    /// response. Keep tool commentary and content distinguishable with a
+    /// bracket convention: wrap any message the tool itself generates —
+    /// diagnostics, truncation notices, confirmations — in `[...]`, and
+    /// return verbatim content (file contents, command output)
+    /// unbracketed.
     fn run(&self, project: &Path) -> Future;
 
     fn title(&self) -> Option<Cow<'_, str>> {

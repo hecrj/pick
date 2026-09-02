@@ -39,7 +39,7 @@ impl Call for Write {
 
             tokio::fs::write(&path, content).await?;
 
-            Ok(format!("Wrote to {}", path.display()))
+            Ok(format!("[Wrote to {}]", path.display()))
         })
     }
 }

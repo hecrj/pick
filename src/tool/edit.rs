@@ -131,12 +131,12 @@ impl Call for Edit {
 
             if replace_all {
                 Ok(format!(
-                    "Edited {} ({} replacements)",
+                    "[Edited {} ({} replacements)]",
                     path.display(),
                     occurrences
                 ))
             } else {
-                Ok(format!("Edited {} (1 replacement)", path.display()))
+                Ok(format!("[Edited {} (1 replacement)]", path.display()))
             }
         })
     }
