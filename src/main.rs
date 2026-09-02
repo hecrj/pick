@@ -26,11 +26,17 @@ use std::path::{Path, PathBuf};
 fn main() -> Result<(), iced::Error> {
     tracing_subscriber::fmt::init();
 
-    iced::application(Pick::new, Pick::update, Pick::view)
-        .subscription(Pick::subscription)
-        .theme(Theme::CatppuccinMocha)
-        .default_font(Font::MONOSPACE)
-        .run()
+    let prompt = env::args().nth(1);
+
+    iced::application(
+        move || Pick::new(prompt.as_deref()),
+        Pick::update,
+        Pick::view,
+    )
+    .subscription(Pick::subscription)
+    .theme(Theme::CatppuccinMocha)
+    .default_font(Font::MONOSPACE)
+    .run()
 }
 
 struct Pick {
@@ -262,7 +268,7 @@ enum Connection {
 
 #[derive(Debug, Clone)]
 enum Message {
-    Connected(Result<Reason, reason::Error>),
+    Connected(Result<(Reason, Vec<reason::Model>), reason::Error>),
     ModelsListed(Result<Vec<reason::Model>, reason::Error>),
     Reconnect,
     InputChanged(text_editor::Action),
@@ -277,13 +283,15 @@ enum Message {
 }
 
 impl Pick {
-    fn new() -> (Self, Task<Message>) {
+    fn new(prompt: Option<&str>) -> (Self, Task<Message>) {
         let mut pick = Self {
             connection: Connection::Disconnected,
             models: BTreeMap::new(),
             model: None,
             messages: Vec::new(),
-            input: text_editor::Content::new(),
+            input: prompt
+                .map(text_editor::Content::with_text)
+                .unwrap_or_default(),
             input_height: 0.0,
             content_width: 0.0,
             snap_to_bottom: true,
@@ -296,7 +304,17 @@ impl Pick {
 
         let connect = pick.connect();
 
-        (pick, Task::batch([connect, operation::focus("input")]))
+        (
+            pick,
+            Task::batch([
+                if prompt.is_some() {
+                    connect.chain(Task::done(Message::Send))
+                } else {
+                    connect
+                },
+                operation::focus("input"),
+            ]),
+        )
     }
 
     fn connect(&mut self) -> Task<Message> {
@@ -316,33 +334,35 @@ impl Pick {
         )
     }
 
+    fn update_models(&mut self, models: Vec<reason::Model>) -> Task<Message> {
+        self.models = models
+            .into_iter()
+            .map(|model| (model.id.clone(), model))
+            .collect();
+
+        if self
+            .model
+            .as_ref()
+            .is_none_or(|model| !self.models.contains_key(model))
+        {
+            self.model = self.models.keys().next().cloned();
+        }
+
+        Task::none()
+    }
+
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Connected(Ok(reason)) => {
+            Message::Connected(Ok((reason, models))) => {
                 self.connection = Connection::Connected(reason);
-                self.list_models()
+                self.update_models(models)
             }
             Message::Reconnect => match &self.connection {
                 Connection::Disconnected => self.connect(),
                 Connection::Connected(_) => self.list_models(),
                 Connection::Connecting => Task::none(),
             },
-            Message::ModelsListed(Ok(models)) => {
-                self.models = models
-                    .into_iter()
-                    .map(|model| (model.id.clone(), model))
-                    .collect();
-
-                if self
-                    .model
-                    .as_ref()
-                    .is_none_or(|model| !self.models.contains_key(model))
-                {
-                    self.model = self.models.keys().next().cloned();
-                }
-
-                Task::none()
-            }
+            Message::ModelsListed(Ok(models)) => self.update_models(models),
             Message::InputChanged(action) => {
                 self.input.perform(action);
 
