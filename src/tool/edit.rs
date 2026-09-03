@@ -307,6 +307,15 @@ impl Line {
             }
         }
 
+        // The walk stops at `end`, before the terminator, so the
+        // iterator is left partially consumed. The highlighter
+        // applies its scope operations lazily, as the iterator is
+        // consumed, so the remainder must be drained: the trailing
+        // operations close the scopes of the line (a `//` comment,
+        // for instance), and, left behind, those scopes would carry
+        // over to the next line highlighted by the same highlighter.
+        scopes.for_each(|_| {});
+
         Self { background, spans }
     }
 
@@ -646,5 +655,45 @@ mod tests {
         let line = Line::new(' ', "", None, std::iter::empty(), std::iter::empty());
 
         assert_eq!(text_of(&line), "  ");
+    }
+
+    #[test]
+    fn a_scope_closed_at_line_end_does_not_carry_over() {
+        use highlighter::Highlight;
+
+        let comment = Theme::CatppuccinMocha
+            .highlight(highlighter::Scope::Comment)
+            .color;
+
+        let edit: Edit = serde_json::from_str(
+            r#"{"path":"src/main.rs","old_string":"// a comment\nlet x = 1;\n","new_string":"// a comment\nlet x = 2;\n"}"#,
+        )
+        .unwrap();
+
+        let [context, removed, added] = &edit.diff[..] else {
+            unreachable!()
+        };
+
+        // The comment is highlighted, and its scope closes at the end
+        // of the line.
+        assert!(
+            context
+                .spans
+                .iter()
+                .any(|span| span.text.as_ref() == " a comment" && span.color == comment)
+        );
+
+        // The scope iterator is consumed lazily by the highlighter, and
+        // the span walk stops before the line terminator. It must be
+        // drained, or the scope that closed at the end of the comment
+        // line stays open, and the uncolored regions of the lines after
+        // it (the whitespace around the identifier) inherit its color.
+        for line in [removed, added] {
+            assert!(
+                line.spans
+                    .iter()
+                    .any(|span| span.text.as_ref() == " x " && span.color.is_none())
+            );
+        }
     }
 }
