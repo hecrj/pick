@@ -33,6 +33,7 @@ impl Call for Bash {
             let output = tokio::process::Command::new("bash")
                 .args(["-c", &command])
                 .current_dir(project)
+                .kill_on_drop(true)
                 .output()
                 .await?;
 

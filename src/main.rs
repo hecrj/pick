@@ -176,7 +176,7 @@ impl Item {
                         let color = match tool.status {
                             Status::Running => palette.warning,
                             Status::Success(_) => palette.success.scale_alpha(0.5),
-                            Status::Invalid | Status::Error(_) => palette.danger,
+                            Status::Invalid | Status::Aborted | Status::Error(_) => palette.danger,
                         };
 
                         let mut style = container::dark(theme);
@@ -244,17 +244,20 @@ struct ToolRun {
 
 #[derive(Debug)]
 enum Status {
-    Invalid,
     Running,
     Success(String),
     Error(String),
+    Invalid,
+    Aborted,
 }
 
 impl Status {
     fn content(&self) -> Option<&str> {
         match self {
-            Status::Invalid | Status::Running => None,
+            Status::Running => None,
             Status::Success(output) | Status::Error(output) => Some(output.as_str()),
+            Status::Invalid => Some("[invalid tool call]"),
+            Status::Aborted => Some("[execution aborted]"),
         }
     }
 }
@@ -280,6 +283,7 @@ enum Message {
     ReplyReceived(Result<reason::Reply, reason::Error>),
     LinkClicked(markdown::Uri),
     ToolFinished(reason::tool::Id, Result<String, reason::Error>),
+    Abort,
 }
 
 impl Pick {
@@ -400,6 +404,7 @@ impl Pick {
                     self.work()
                 } else {
                     self.tasks.clear();
+                    self.abort_tools();
 
                     // Wait for a couple seconds to server slots return to idle
                     // This is necessary for proper reuse of prompt caches
@@ -512,18 +517,28 @@ impl Pick {
                     return Task::none();
                 };
 
+                let _ = self.tasks.remove(&Work::Tool(id));
+
+                if matches!(tool.status, Status::Aborted) {
+                    return Task::none();
+                }
+
                 tool.status = match result {
                     Ok(output) => Status::Success(output),
                     Err(error) => Status::Error(error.to_string()),
                 };
-
-                let _ = self.tasks.remove(&Work::Tool(id));
 
                 if self.tasks.is_empty() {
                     self.work()
                 } else {
                     Task::none()
                 }
+            }
+            Message::Abort => {
+                self.tasks.clear();
+                self.abort_tools();
+
+                Task::none()
             }
             Message::Connected(Err(error))
             | Message::ModelsListed(Err(error))
@@ -534,6 +549,16 @@ impl Pick {
                 log::error!("{error}");
 
                 Task::none()
+            }
+        }
+    }
+
+    fn abort_tools(&mut self) {
+        for message in &mut self.messages {
+            if let Item::Tool(tool) = message
+                && matches!(tool.status, Status::Running)
+            {
+                tool.status = Status::Aborted;
             }
         }
     }
@@ -592,7 +617,8 @@ impl Pick {
                 let (run, handle) =
                     Task::perform(future, Message::ToolFinished.with(call.id.clone())).abortable();
 
-                self.tasks.insert(Work::Tool(call.id.clone()), handle);
+                self.tasks
+                    .insert(Work::Tool(call.id.clone()), handle.abort_on_drop());
 
                 (run, Status::Running)
             }
@@ -638,6 +664,10 @@ impl Pick {
             .placeholder("Type your query here...")
             .on_action(Message::InputChanged)
             .key_binding(|key_press| {
+                if key_press.key == keyboard::Key::Named(keyboard::key::Named::Escape) {
+                    return Some(text_editor::Binding::Custom(Message::Abort));
+                }
+
                 if !key_press.is_focused {
                     return None;
                 }
