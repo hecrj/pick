@@ -270,23 +270,19 @@ impl Line {
                 if is_over {
                     break;
                 }
-
-                while range.end <= position {
-                    (range, scope) = scopes.next().expect("scope must exist");
-                }
             }
 
             let stop = end.min(position + value.len());
 
             while position < stop {
+                while range.end <= position {
+                    (range, scope) = scopes.next().expect("scope must exist");
+                }
+
                 let stop = stop.min(range.end);
                 let span = highlight::span(line, position..stop, scope);
 
                 spans.push(span);
-
-                if range.end <= position {
-                    (range, scope) = scopes.next().expect("scope must exist");
-                }
 
                 position = stop;
             }
@@ -524,6 +520,35 @@ mod tests {
             for line in &lines {
                 for span in &line.spans {
                     assert!(!span.text.contains('\n'));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scope_boundaries_never_emit_empty_spans() {
+        // The walk syncs the scope cursor with the position cursor
+        // before cutting each span, so a cursor sitting on a scope
+        // boundary must never yield a zero-width span.
+        for (old, new) in [
+            ("let x = 1\n", "let x = 2\n"),
+            ("let x = 1; y\n", "let x = 2; y\n"),
+            ("let x = 1\r\n", "let x = 2\r\n"),
+            (
+                "fn main() {\n    let x = 1;\n}\n",
+                "fn main() {\n    let x = 2;\n}\n",
+            ),
+        ] {
+            let edit: Edit = serde_json::from_str(&format!(
+                r#"{{"path":"src/main.rs","old_string":{},"new_string":{}}}"#,
+                serde_json::to_string(old).unwrap(),
+                serde_json::to_string(new).unwrap(),
+            ))
+            .unwrap();
+
+            for line in &edit.diff {
+                for span in &line.spans {
+                    assert!(!span.text.is_empty(), "zero-width span");
                 }
             }
         }
