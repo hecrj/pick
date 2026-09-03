@@ -232,11 +232,16 @@ impl Line {
 
         // The scopes partition the line from zero to its end, so a
         // single cursor walks the segments and the scopes, cutting
-        // them at `end`.
+        // them at `end`. If the highlighter provides no scopes, or
+        // stops short of the end of the line, the remainder is
+        // rendered without syntax highlighting.
         let mut position = 0;
         let mut values = values.into_iter();
         let mut scopes = scopes.into_iter();
-        let (mut range, mut scope) = scopes.next().expect("scope must exist");
+        let (mut range_end, mut scope) = scopes
+            .next()
+            .map(|(range, scope)| (range.end, scope))
+            .unwrap_or((line.len(), highlighter::Scope::Other));
 
         let highlight = style.map(|color| color.scale_alpha(HIGHLIGHT_ALPHA));
 
@@ -275,11 +280,22 @@ impl Line {
             let stop = end.min(position + value.len());
 
             while position < stop {
-                while range.end <= position {
-                    (range, scope) = scopes.next().expect("scope must exist");
+                // Running out of scopes leaves the remainder of the
+                // line without syntax highlighting.
+                while range_end <= position {
+                    match scopes.next() {
+                        Some((range, new_scope)) => {
+                            range_end = range.end;
+                            scope = new_scope;
+                        }
+                        None => {
+                            range_end = line.len();
+                            scope = highlighter::Scope::Other;
+                        }
+                    }
                 }
 
-                let stop = stop.min(range.end);
+                let stop = stop.min(range_end);
                 let span = highlight::span(line, position..stop, scope);
 
                 spans.push(span);
@@ -552,5 +568,60 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_line_without_scopes_is_rendered_plain() {
+        // The walk must not assume the highlighter scopes the whole
+        // line: without any scopes, the line renders without syntax
+        // highlighting instead of panicking.
+        let line = Line::new(
+            '-',
+            "let x = 1\n",
+            None,
+            [(false, "let x = 1\n")],
+            std::iter::empty(),
+        );
+
+        assert_eq!(text_of(&line), "- let x = 1");
+
+        for span in &line.spans {
+            assert!(span.color.is_none());
+            assert!(span.highlight.is_none());
+        }
+    }
+
+    #[test]
+    fn scopes_that_stop_short_of_the_end_leave_the_remainder_plain() {
+        let line = Line::new(
+            '+',
+            "let x = 1\n",
+            None,
+            [(false, "let x = 1\n")],
+            [(0..3, highlighter::Scope::Keyword)],
+        );
+
+        assert_eq!(text_of(&line), "+ let x = 1");
+
+        let keyword = Theme::CatppuccinMocha.palette().primary.strong.color;
+
+        assert!(
+            line.spans
+                .iter()
+                .any(|span| { span.text.as_ref() == "let" && span.color == Some(keyword) })
+        );
+
+        assert!(
+            line.spans
+                .iter()
+                .any(|span| span.text.as_ref() == " x = 1" && span.color.is_none())
+        );
+    }
+
+    #[test]
+    fn an_empty_line_is_rendered_without_scopes() {
+        let line = Line::new(' ', "", None, std::iter::empty(), std::iter::empty());
+
+        assert_eq!(text_of(&line), "  ");
     }
 }
