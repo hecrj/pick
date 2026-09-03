@@ -218,8 +218,9 @@ impl Line {
 
         let mut spans = vec![span(format!("{prefix} "))];
 
-        // Every line renders in its own `container`, so the terminator
-        // is dropped from the end of the line, terminated or not.
+        // Every line renders in its own `container`, so the
+        // terminator, whether it is `\n`, `\r\n`, or `\r`, is
+        // dropped from the end of the line, terminated or not.
         let mut end = line.len();
 
         if line.ends_with('\n') {
@@ -228,6 +229,8 @@ impl Line {
             if line[..end].ends_with('\r') {
                 end -= '\r'.len_utf8();
             }
+        } else if line.ends_with('\r') {
+            end -= '\r'.len_utf8();
         }
 
         // The scopes partition the line from zero to its end, so a
@@ -539,6 +542,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn strips_lone_cr_terminators() {
+        // A lone `\r` terminates a line just like `\n` and `\r\n`,
+        // so it is dropped from the spans along with them.
+        let edit: Edit = serde_json::from_str(
+            r#"{"path":"a.txt","old_string":"foo 1\rbar\rbaz\r","new_string":"foo 2\rbar\rqux\r"}"#,
+        )
+        .unwrap();
+
+        let [removed_1, added_1, context, removed_2, added_2] = &edit.diff[..] else {
+            unreachable!()
+        };
+
+        assert_eq!(text_of(removed_1), "- foo 1");
+        assert_eq!(text_of(added_1), "+ foo 2");
+        assert_eq!(text_of(context), "  bar");
+        assert_eq!(text_of(removed_2), "- baz");
+        assert_eq!(text_of(added_2), "+ qux");
     }
 
     #[test]
