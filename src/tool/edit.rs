@@ -6,7 +6,7 @@ use iced::border;
 use iced::highlighter;
 use iced::widget::text;
 use iced::widget::{column, container, rich_text, scrollable, span};
-use iced::{Color, Element, Fill, Fit, Highlighter, Never, Theme};
+use iced::{Code, Color, Element, Fill, Fit, Never, Theme};
 
 use serde::Deserialize;
 use similar::{ChangeTag, InlineChangeOptions, TextDiff};
@@ -169,8 +169,8 @@ impl Line {
             token: highlight::token(path),
         };
 
-        let mut old_highlighter = Highlighter::new(&settings);
-        let mut new_highlighter = Highlighter::new(&settings);
+        let mut old_parser = highlighter::Parser::new(&settings);
+        let mut new_parser = highlighter::Parser::new(&settings);
 
         diff.iter_all_inline_changes_with_options_deadline(options, deadline)
             .map(|change| {
@@ -183,14 +183,14 @@ impl Line {
                 let line: String = change.values().iter().map(|&(_, value)| value).collect();
 
                 let scopes = match change.tag() {
-                    ChangeTag::Insert => new_highlighter.highlight_line(&line),
-                    ChangeTag::Delete => old_highlighter.highlight_line(&line),
+                    ChangeTag::Insert => new_parser.parse_line(&line),
+                    ChangeTag::Delete => old_parser.parse_line(&line),
                     ChangeTag::Equal => {
                         // The scopes are discarded, but the iterator must be
                         // consumed: the old highlighter's state only
                         // advances as the line is highlighted.
-                        old_highlighter.highlight_line(&line).for_each(|_| {});
-                        new_highlighter.highlight_line(&line)
+                        old_parser.parse_line(&line).for_each(|_| {});
+                        new_parser.parse_line(&line)
                     }
                 };
 
@@ -210,7 +210,7 @@ impl Line {
         line: &str,
         style: Option<Color>,
         values: impl IntoIterator<Item = (bool, &'a str)>,
-        scopes: impl IntoIterator<Item = (Range<usize>, highlighter::Scope)>,
+        scopes: impl IntoIterator<Item = (Range<usize>, Code)>,
     ) -> Self {
         let background = style
             .map(|color| color.scale_alpha(BACKGROUND_ALPHA))
@@ -244,7 +244,7 @@ impl Line {
         let (mut range_end, mut scope) = scopes
             .next()
             .map(|(range, scope)| (range.end, scope))
-            .unwrap_or((line.len(), highlighter::Scope::Other));
+            .unwrap_or((line.len(), Code::Other));
 
         let highlight = style.map(|color| color.scale_alpha(HIGHLIGHT_ALPHA));
 
@@ -293,7 +293,7 @@ impl Line {
                         }
                         None => {
                             range_end = line.len();
-                            scope = highlighter::Scope::Other;
+                            scope = Code::Other;
                         }
                     }
                 }
@@ -421,7 +421,7 @@ mod tests {
         // never emphasized.
         assert!(removed_line.spans.iter().any(|span| {
             span.text.as_ref() == "let"
-                && span.color == Some(Theme::CatppuccinMocha.palette().primary.strong.color)
+                && span.color == Some(Theme::CatppuccinMocha.palette().primary.base.color)
                 && span.highlight.is_none()
         }));
 
@@ -630,12 +630,12 @@ mod tests {
             "let x = 1\n",
             None,
             [(false, "let x = 1\n")],
-            [(0..3, highlighter::Scope::Keyword)],
+            [(0..3, Code::Keyword)],
         );
 
         assert_eq!(text_of(&line), "+ let x = 1");
 
-        let keyword = Theme::CatppuccinMocha.palette().primary.strong.color;
+        let keyword = Theme::CatppuccinMocha.palette().primary.base.color;
 
         assert!(
             line.spans
@@ -659,11 +659,7 @@ mod tests {
 
     #[test]
     fn a_scope_closed_at_line_end_does_not_carry_over() {
-        use highlighter::Highlight;
-
-        let comment = Theme::CatppuccinMocha
-            .highlight(highlighter::Scope::Comment)
-            .color;
+        let comment = Code::Comment.highlight(&Theme::CatppuccinMocha).color;
 
         let edit: Edit = serde_json::from_str(
             r#"{"path":"src/main.rs","old_string":"// a comment\nlet x = 1;\n","new_string":"// a comment\nlet x = 2;\n"}"#,

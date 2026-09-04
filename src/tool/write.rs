@@ -4,7 +4,7 @@ use crate::highlight;
 
 use iced::highlighter;
 use iced::widget::{column, container, rich_text, span, text};
-use iced::{Element, Fill, Highlighter, Never};
+use iced::{Element, Fill, Never};
 
 use serde::Deserialize;
 
@@ -107,7 +107,7 @@ struct Preview {
 
 impl Preview {
     fn of(path: &str, content: &str) -> Self {
-        let mut highlighter = Highlighter::new(&highlighter::Settings {
+        let mut highlighter = highlighter::Parser::new(&highlighter::Settings {
             token: highlight::token(path),
         });
 
@@ -130,8 +130,8 @@ impl Preview {
             }
 
             let mut spans: Vec<text::Span<'static>> = highlighter
-                .highlight_line(line)
-                .map(|(range, scope)| highlight::span(line, range, scope))
+                .parse_line(line)
+                .map(|(range, code)| highlight::span(line, range, code))
                 .collect();
 
             if cut {
@@ -269,7 +269,7 @@ mod tests {
         // theme, the rest of the line stays plain.
         assert!(line.iter().any(|span| {
             span.text.as_ref() == "let"
-                && span.color == Some(Theme::CatppuccinMocha.palette().primary.strong.color)
+                && span.color == Some(Theme::CatppuccinMocha.palette().primary.base.color)
         }));
 
         assert!(line.iter().any(|span| {

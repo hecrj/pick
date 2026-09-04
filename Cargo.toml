@@ -30,7 +30,7 @@ type-complexity = "allow"
 
 [patch.crates-io]
 iced.git = "https://github.com/iced-rs/iced.git"
-iced.rev = "ce598e363fada1ca9ca66c8c9f837aa9c311c45e"
+iced.rev = "13e85bec271a0dc4e600585f48817d578399cd8a"
 
 reason.git = "https://github.com/hecrj/reason.git"
 reason.rev = "16f6c66117e07240e78451fae109bbac0dadcde3"

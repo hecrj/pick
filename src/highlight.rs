@@ -1,6 +1,5 @@
-use iced::highlighter::{Highlight, Scope};
 use iced::widget::{self, text};
-use iced::{Font, Theme};
+use iced::{Code, Font, Theme};
 
 use std::ops::Range;
 use std::path::Path;
@@ -16,12 +15,12 @@ pub(crate) fn token(path: impl AsRef<Path>) -> String {
 }
 
 /// A span of a region of `line` styled by the theme for `scope`.
-pub(crate) fn span(line: &str, range: Range<usize>, scope: Scope) -> text::Span<'static> {
-    let format = Theme::CatppuccinMocha.highlight(scope);
+pub(crate) fn span(line: &str, range: Range<usize>, code: Code) -> text::Span<'static> {
+    let style = code.highlight(&Theme::CatppuccinMocha);
 
     widget::span(line[range].to_owned())
-        .color_maybe(format.color)
-        .font_maybe(format.style.map(|style| Font {
+        .color_maybe(style.color)
+        .font_maybe(style.style.map(|style| Font {
             style,
             ..Font::MONOSPACE
         }))

@@ -221,7 +221,7 @@ impl Markdown {
                 font,
                 ..markdown::Settings::default()
             },
-            &Theme::CatppuccinMocha,
+            Theme::CatppuccinMocha,
         )
         .map(Message::LinkClicked)
     }
