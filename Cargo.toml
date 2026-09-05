@@ -29,6 +29,9 @@ large-enum-variant = "allow"
 type-complexity = "allow"
 
 [patch.crates-io]
+cosmic-text.git = "https://github.com/hecrj/cosmic-text.git"
+cosmic-text.rev = "c46a7e3d29cc43078cc77f843e8d51ad0adad118"
+
 iced.git = "https://github.com/iced-rs/iced.git"
 iced.rev = "13e85bec271a0dc4e600585f48817d578399cd8a"
 
