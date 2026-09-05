@@ -13,7 +13,7 @@ use iced::widget::{
     bottom, center, center_x, column, container, markdown, progress_bar, right, row, scrollable,
     sensor, space, stack, text, text_editor,
 };
-use iced::{Center, Element, Fill, Fit, Font, Size, Subscription, Task, Theme, never};
+use iced::{Center, Element, Fill, Fit, Font, Pixels, Size, Subscription, Task, Theme, never};
 
 use function::Binary;
 use reason::Reason;
@@ -58,6 +58,7 @@ struct Pick {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum Work {
     Completion,
+    Compaction,
     Tool(reason::tool::Id),
 }
 
@@ -65,11 +66,12 @@ enum Item {
     User(Markdown),
     Assistant(Reply),
     Tool(ToolRun),
+    Compaction(Compaction),
 }
 
 impl Item {
-    fn to_message(&self) -> reason::Message {
-        match self {
+    fn to_message(&self) -> Option<reason::Message> {
+        Some(match self {
             Item::User(markdown) => reason::Message::User(markdown.raw.clone()),
             Item::Assistant(reply) => reason::Message::Assistant(reason::Reply {
                 reasoning: reply.reasoning.raw.clone(),
@@ -80,7 +82,8 @@ impl Item {
                 id: tool.call.id.clone(),
                 content: tool.status.content().unwrap_or_default().to_owned(),
             }),
-        }
+            Item::Compaction { .. } => None?,
+        })
     }
 
     fn view(&self) -> Element<'_, Message> {
@@ -88,7 +91,7 @@ impl Item {
             Item::Assistant(reply) => {
                 let reasoning = if !reply.reasoning.raw.is_empty() {
                     Some(
-                        container(reply.reasoning.view(Font::MONOSPACE)).style(|theme| {
+                        container(reply.reasoning.view(Font::MONOSPACE, NORMAL)).style(|theme| {
                             container::Style {
                                 text_color: Some(theme.palette().secondary.strong.color),
                                 ..container::transparent(theme)
@@ -99,33 +102,17 @@ impl Item {
                     None
                 };
 
-                let prompt_progress = if reply.prompt.total != reply.prompt.processed {
-                    let progress = center_x(
-                        progress_bar(
-                            0.0..=1.0,
-                            (reply.prompt.processed - reply.prompt.cached) as f32
-                                / (reply.prompt.total - reply.prompt.cached) as f32,
-                        )
-                        .girth(10)
-                        .length(100)
-                        .style(progress_bar::secondary),
-                    );
-
-                    Some(progress)
-                } else {
-                    None
-                };
-
                 column![
-                    prompt_progress,
+                    prompt_progress(reply.prompt),
                     reasoning,
-                    (!reply.content.raw.is_empty()).then(|| reply.content.view(Font::DEFAULT)),
+                    (!reply.content.raw.is_empty())
+                        .then(|| reply.content.view(Font::DEFAULT, NORMAL)),
                 ]
                 .spacing(10)
                 .into()
             }
             Item::User(message) => right(
-                container(message.view(Font::DEFAULT))
+                container(message.view(Font::DEFAULT, NORMAL))
                     .padding(10)
                     .style(container::rounded_box),
             )
@@ -191,6 +178,19 @@ impl Item {
                     .style(container::bordered_box)
                     .into()
             }
+            Item::Compaction(compaction) => {
+                let notice = center_x(text(if compaction.is_finished {
+                    format!("Compacted into {} tokens", compaction.tokens)
+                } else if compaction.reply.content.raw.is_empty() {
+                    format!("Analyzing... {} tokens", compaction.reasoning_tokens)
+                } else {
+                    format!("Compacting... {} tokens", compaction.tokens)
+                }));
+
+                column![prompt_progress(compaction.reply.prompt), notice]
+                    .spacing(10)
+                    .into()
+            }
         }
     }
 }
@@ -214,12 +214,12 @@ impl Markdown {
         self.content.push_str(delta);
     }
 
-    fn view(&self, font: Font) -> Element<'_, Message> {
+    fn view(&self, font: Font, size: impl Into<Pixels>) -> Element<'_, Message> {
         markdown(
             self.content.items(),
             markdown::Settings {
                 font,
-                ..markdown::Settings::default()
+                ..markdown::Settings::with_text_size(size)
             },
             Theme::CatppuccinMocha,
         )
@@ -262,6 +262,14 @@ impl Status {
     }
 }
 
+struct Compaction {
+    reply: Reply,
+    tokens: u64,
+    reasoning_tokens: u64,
+    to: usize,
+    is_finished: bool,
+}
+
 #[derive(Debug, Clone)]
 enum Connection {
     Disconnected,
@@ -281,6 +289,8 @@ enum Message {
     Send,
     ReplyProgressed(reason::Event),
     ReplyReceived(Result<reason::Reply, reason::Error>),
+    CompactionProgressed(reason::Event),
+    CompactionReceived(Result<reason::Reply, reason::Error>),
     LinkClicked(markdown::Uri),
     ToolFinished(reason::tool::Id, Result<String, reason::Error>),
     Abort,
@@ -403,8 +413,7 @@ impl Pick {
                 let work = if self.tasks.is_empty() {
                     self.work()
                 } else {
-                    self.tasks.clear();
-                    self.abort_tools();
+                    self.abort();
 
                     // Wait for a couple seconds to server slots return to idle
                     // This is necessary for proper reuse of prompt caches
@@ -499,8 +508,56 @@ impl Pick {
                     Task::none()
                 }
             }
+            Message::CompactionProgressed(event) => {
+                let Some(Item::Compaction(compaction)) = self.messages.last_mut() else {
+                    return Task::none();
+                };
+
+                let new_tokens = event
+                    .timings
+                    .zip(compaction.reply.timings)
+                    .map(|(now, old)| now.total_tokens().saturating_sub(old.total_tokens()))
+                    .unwrap_or(0);
+
+                compaction.reply.timings = event.timings;
+
+                match event.delta {
+                    reason::Delta::PromptProcessed(progress) => {
+                        compaction.reply.prompt = progress;
+                    }
+                    reason::Delta::ReasoningChanged(delta) => {
+                        compaction.reply.reasoning.push_str(&delta);
+                        compaction.reasoning_tokens += new_tokens;
+                    }
+                    reason::Delta::ContentChanged(delta) => {
+                        compaction.reply.content.push_str(&delta);
+                        compaction.tokens += new_tokens;
+                    }
+                    reason::Delta::ToolCallsChanged(_) => {}
+                }
+
+                Task::none()
+            }
+            Message::CompactionReceived(Ok(_reply)) => {
+                let _ = self.tasks.remove(&Work::Compaction);
+
+                let Some(Item::Compaction(compaction)) = self.messages.last_mut() else {
+                    return Task::none();
+                };
+
+                compaction.reply.timings = Some(reason::Timings::default());
+                compaction.is_finished = true;
+
+                log::trace!(
+                    "compaction received: content_len={} reasoning_len={}",
+                    _reply.content.len(),
+                    _reply.reasoning.len()
+                );
+
+                self.work()
+            }
             Message::LinkClicked(uri) => {
-                dbg!(uri);
+                log::debug!("{uri:?}");
 
                 Task::none()
             }
@@ -535,16 +592,16 @@ impl Pick {
                 }
             }
             Message::Abort => {
-                self.tasks.clear();
-                self.abort_tools();
+                self.abort();
 
                 Task::none()
             }
             Message::Connected(Err(error))
             | Message::ModelsListed(Err(error))
-            | Message::ReplyReceived(Err(error)) => {
+            | Message::ReplyReceived(Err(error))
+            | Message::CompactionReceived(Err(error)) => {
                 self.connection = Connection::Disconnected;
-                self.tasks.clear();
+                self.abort();
 
                 log::error!("{error}");
 
@@ -553,13 +610,29 @@ impl Pick {
         }
     }
 
-    fn abort_tools(&mut self) {
+    fn abort(&mut self) {
+        self.tasks.clear();
+
         for message in &mut self.messages {
             if let Item::Tool(tool) = message
                 && matches!(tool.status, Status::Running)
             {
                 tool.status = Status::Aborted;
             }
+        }
+
+        let index = self.messages.iter().rposition(|message| {
+            matches!(
+                message,
+                Item::Compaction(Compaction {
+                    is_finished: false,
+                    ..
+                })
+            )
+        });
+
+        if let Some(index) = index {
+            self.messages.remove(index);
         }
     }
 
@@ -568,6 +641,10 @@ impl Pick {
 
         if !self.tasks.is_empty() {
             return Task::none();
+        }
+
+        if let Some(compact) = self.compact() {
+            return compact;
         }
 
         let Connection::Connected(reason) = &self.connection else {
@@ -580,14 +657,17 @@ impl Pick {
 
         let reason = reason.clone();
         let model = model.clone();
-        let messages: Vec<_> = [reason::Message::System(
-            "You are an expert coding assistant. The user wants your help to develop a project in the current directory.".to_owned(),
-        )]
-        .into_iter()
-        .chain(self.messages.iter().map(Item::to_message))
-        .collect();
 
-        let tools: Vec<_> = self.tools.values().map(Tool::to_metadata).collect();
+        let messages: Vec<_> = self
+            .opener()
+            .chain(self.context().iter().filter_map(Item::to_message))
+            .collect();
+
+        for message in &messages {
+            log::trace!("{message:?}");
+        }
+
+        let tools: Vec<_> = self.tools().collect();
 
         let (reply, handle) = Task::sip(
             sipper(async move |sender| reason.reply(&model, &messages, &tools).run(sender).await),
@@ -632,6 +712,120 @@ impl Pick {
         }));
 
         run
+    }
+
+    fn compact(&mut self) -> Option<Task<Message>> {
+        use iced::task::{Sipper, sipper};
+
+        /// Minimum amount of tokens compaction needs
+        const COMPACTION_MIN_TOKENS: u64 = 4_000;
+        /// Maximum amount of tokens compaction needs
+        const COMPACTION_MAX_TOKENS: u64 = 10_000;
+        /// Factor of context from last message to keep intact
+        const CONTINUITY_CONTEXT: f32 = 0.2;
+
+        const COMPACTION_PROMPT: &str = r#"The earlier part of this conversation is about to be removed to free up context.
+After your next message, only your summary of it will remain, embedded in your system prompt for the rest of the session.
+
+Write a concise state handoff so the work can continue seamlessly without the original messages. Cover:
+- The user's goal, and any explicit constraints or preferences
+- Key decisions and their rationale (including rejected alternatives)
+- Current state: files created or modified and why, what is done, what is in progress
+- Errors encountered and how they were resolved or to be avoided
+- Open questions and the immediate next steps
+Omit chit-chat, raw tool output, and failed experiments (keep only the lesson).
+If your system prompt already contains a previous summary, merge it into this one; the result must be self-contained.
+Reply with only the summary, under 500 words. You cannot use any tools."#;
+
+        let Connection::Connected(reason) = &self.connection else {
+            return None;
+        };
+
+        let model = self.model.as_ref()?;
+        let context_size = self.context_size()?;
+
+        let timings = self.timings()?;
+
+        let total_tokens = timings.total_tokens();
+        let context_left = context_size.saturating_sub(total_tokens);
+        let budget = (context_size / 8).clamp(COMPACTION_MIN_TOKENS, COMPACTION_MAX_TOKENS);
+
+        if context_left > budget {
+            return None;
+        }
+
+        let tokens_to_keep =
+            ((total_tokens as f32 * CONTINUITY_CONTEXT).round() as u64).max(budget / 2);
+        let context = self.context();
+
+        // Find target reply
+        let target = context
+            .iter()
+            .rev()
+            .position(|item| {
+                let Item::Assistant(Reply {
+                    timings: Some(timings),
+                    ..
+                }) = item
+                else {
+                    return false;
+                };
+
+                log::trace!(
+                    "compact candidate: total={} reply={}",
+                    total_tokens,
+                    timings.total_tokens()
+                );
+
+                total_tokens.saturating_sub(timings.total_tokens()) >= tokens_to_keep
+            })
+            .unwrap_or(context.len());
+
+        // Compact tools as well
+        let tools = context[context.len() - target..]
+            .iter()
+            .take_while(|item| matches!(item, Item::Tool(_)))
+            .count();
+
+        let end = context.len() - target + tools;
+
+        log::debug!(
+            "compact: total_tokens={} context_left={} context.len={} target={} end={}",
+            total_tokens,
+            context_left,
+            context.len(),
+            target,
+            end
+        );
+
+        let prefix: Vec<_> = self
+            .opener()
+            .chain(context[..end].iter().filter_map(Item::to_message))
+            .chain([reason::Message::User(COMPACTION_PROMPT.to_owned())])
+            .collect();
+
+        let reason = reason.clone();
+        let model = model.clone();
+        let tools: Vec<_> = self.tools().collect();
+
+        self.messages.push(Item::Compaction(Compaction {
+            reply: Reply::default(),
+            tokens: 0,
+            reasoning_tokens: 0,
+            to: (self.messages.len() - context.len()) + end,
+            is_finished: false,
+        }));
+
+        let (reply, handle) = Task::sip(
+            sipper(async move |sender| reason.reply(&model, &prefix, &tools).run(sender).await),
+            Message::CompactionProgressed,
+            Message::CompactionReceived,
+        )
+        .abortable();
+
+        self.tasks.insert(Work::Compaction, handle.abort_on_drop());
+
+        Some(reply)
     }
 
     fn view(&self) -> Element<'_, Message> {
@@ -685,13 +879,7 @@ impl Pick {
             let project = tildify(&self.project, self.home.as_deref());
 
             let server = {
-                let timings = self.messages.iter().rev().find_map(|item| {
-                    if let Item::Assistant(reply) = item {
-                        reply.timings
-                    } else {
-                        None
-                    }
-                });
+                let timings = self.timings();
 
                 let info = timings.map(|timings| {
                     row![
@@ -736,13 +924,7 @@ impl Pick {
                     }
                 });
 
-                let context_size = self
-                    .model
-                    .as_ref()
-                    .and_then(|model| self.models.get(model))
-                    .and_then(|model| model.context_size);
-
-                let context = context_led(context_size, timings);
+                let context = context_led(self.context_size(), timings);
 
                 row![info, models, context].spacing(10).align_y(Center)
             };
@@ -777,9 +959,87 @@ impl Pick {
     fn subscription(&self) -> Subscription<Message> {
         time::every(time::seconds(10)).map(|_| Message::Reconnect)
     }
+
+    fn context_size(&self) -> Option<u64> {
+        self.model
+            .as_ref()
+            .and_then(|model| self.models.get(model))
+            .and_then(|model| model.context_size)
+    }
+
+    fn context(&self) -> &[Item] {
+        let start = self
+            .last_compaction()
+            .map(|compaction| compaction.to)
+            .unwrap_or_default();
+
+        &self.messages[start..]
+    }
+
+    fn last_compaction(&self) -> Option<&Compaction> {
+        self.messages.iter().rev().find_map(|item| {
+            let Item::Compaction(
+                compaction @ Compaction {
+                    is_finished: true, ..
+                },
+            ) = item
+            else {
+                return None;
+            };
+
+            Some(compaction)
+        })
+    }
+
+    fn system_prompt(&self) -> String {
+        const PROMPT: &str = "You are an expert coding assistant. \
+            The user wants your help to develop a project in the current directory.";
+
+        if let Some(compaction) = self.last_compaction() {
+            format!("{PROMPT}\n\n{}", compaction.reply.content.raw)
+        } else {
+            PROMPT.to_owned()
+        }
+    }
+
+    /// The system prompt, plus the most recent user message before the
+    /// compaction cutoff — the opener of the turn the boundary falls in —
+    /// so the model retains the verbatim request that the summary only
+    /// paraphrases.
+    fn opener(&self) -> impl Iterator<Item = reason::Message> {
+        let start = self.messages.len() - self.context().len();
+
+        std::iter::once(reason::Message::System(self.system_prompt())).chain(
+            if let Some(Item::Assistant(_) | Item::Compaction(_)) = self.messages.get(start)
+                && let Some(Item::User(markdown)) = self.messages[..start]
+                    .iter()
+                    .rev()
+                    .find(|item| matches!(item, Item::User(_)))
+            {
+                Some(reason::Message::User(markdown.raw.clone()))
+            } else {
+                None
+            },
+        )
+    }
+
+    fn tools(&self) -> impl Iterator<Item = reason::Tool> {
+        self.tools.values().map(Tool::to_metadata)
+    }
+
+    fn timings(&self) -> Option<reason::Timings> {
+        self.context().iter().rev().find_map(|item| {
+            if let Item::Assistant(reply) | Item::Compaction(Compaction { reply, .. }) = item {
+                reply.timings
+            } else {
+                None
+            }
+        })
+    }
 }
 
 const TITLE: u32 = 20;
+const NORMAL: u32 = 16;
 const SMALL: u32 = 14;
 const MAX_WIDTH: u32 = 770;
 const SNAP_TO_BOTTOM: f32 = 20.0;
@@ -856,10 +1116,7 @@ fn context_led<'a>(
                 if let Some(timings) = self.timings
                     && let Some(context_size) = self.context_size
                 {
-                    let tokens_used =
-                        timings.cached + timings.prompt.amount + timings.predicted.amount;
-
-                    let usage = tokens_used as f32 / context_size as f32;
+                    let usage = timings.total_tokens() as f32 / context_size as f32;
 
                     let arc = {
                         let mut builder = canvas::path::Builder::new();
@@ -905,7 +1162,7 @@ fn context_led<'a>(
 
     match (context_size, timings) {
         (Some(context_size), Some(timings)) => {
-            let tokens = timings.cached + timings.prompt.amount + timings.predicted.amount;
+            let tokens = timings.total_tokens();
             let percent = tokens as f32 / context_size as f32 * 100.0;
 
             tooltip(
@@ -938,4 +1195,24 @@ fn thousands(value: u64) -> String {
     }
 
     formatted
+}
+
+fn prompt_progress<'a>(progress: reason::Progress) -> Option<Element<'a, Message>> {
+    if progress.total == progress.processed {
+        return None;
+    }
+
+    Some(
+        center_x(
+            progress_bar(
+                0.0..=1.0,
+                (progress.processed - progress.cached) as f32
+                    / (progress.total - progress.cached) as f32,
+            )
+            .girth(10)
+            .length(100)
+            .style(progress_bar::secondary),
+        )
+        .into(),
+    )
 }
