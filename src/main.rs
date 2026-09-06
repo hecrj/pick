@@ -35,7 +35,7 @@ fn main() -> Result<(), iced::Error> {
     )
     .subscription(Pick::subscription)
     .theme(Theme::CatppuccinMocha)
-    .default_font(Font::MONOSPACE)
+    .font(Font::MONOSPACE)
     .run()
 }
 
@@ -220,7 +220,8 @@ impl Markdown {
             markdown::Settings {
                 font,
                 ..markdown::Settings::with_text_size(size)
-            },
+            }
+            .line_height(1.5),
             Theme::CatppuccinMocha,
         )
         .map(Message::LinkClicked)
