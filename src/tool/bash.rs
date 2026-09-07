@@ -142,6 +142,10 @@ mod tests {
         assert!(output.to_string().is_empty());
     }
 
+    /// Windows has no signals, so a killed process cannot be reported
+    /// as one; even under WSL the spawned child is the Windows proxy,
+    /// whose exit status carries no signal.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_signaled_command_is_reported_as_a_notice() {
         let bash = Bash {
