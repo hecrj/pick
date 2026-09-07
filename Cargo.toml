@@ -34,7 +34,7 @@ cosmic-text.git = "https://github.com/hecrj/cosmic-text.git"
 cosmic-text.rev = "c46a7e3d29cc43078cc77f843e8d51ad0adad118"
 
 iced.git = "https://github.com/iced-rs/iced.git"
-iced.rev = "5a8b034376878ed9e0f3e07bd55187f891e74b8e"
+iced.rev = "f3ee4cfdc2bb7d26dea628986e343c24dac532f0"
 
 reason.git = "https://github.com/hecrj/reason.git"
 reason.rev = "c9e272270820ee75ba1e817d479a88ee9f1550b0"
