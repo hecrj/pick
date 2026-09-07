@@ -1342,14 +1342,10 @@ fn prompt_progress<'a>(progress: reason::Progress) -> Option<Element<'a, Message
 
     Some(
         center_x(
-            progress_bar(
-                0.0..=1.0,
-                (progress.processed - progress.cached) as f32
-                    / (progress.total - progress.cached) as f32,
-            )
-            .girth(10)
-            .length(100)
-            .style(progress_bar::secondary),
+            progress_bar(0.0..=1.0, progress.processed as f32 / progress.total as f32)
+                .girth(10)
+                .length(100)
+                .style(progress_bar::secondary),
         )
         .into(),
     )
