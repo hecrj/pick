@@ -153,7 +153,13 @@ impl Item {
                         .id(tool.call.id.as_str().to_owned())
                         .width(Fill)
                         .height(Fit.max(MAX_TOOL_LOG_HEIGHT))
-                        .on_scroll(|viewport| Message::ToolScrolled(tool.call.id.clone(), viewport))
+                        .on_scroll(|viewport| {
+                            let snap_to_bottom = snap_to_bottom(viewport);
+
+                            (tool.snap_to_bottom != snap_to_bottom).then_some(
+                                Message::ToolScrolled(tool.call.id.clone(), snap_to_bottom),
+                            )
+                        })
                         .spacing(10)
                         .into(),
                     ),
@@ -354,7 +360,7 @@ enum Message {
     InputChanged(text_editor::Action),
     InputResized(Size),
     ContentResized(Size),
-    ContentScrolled(scrollable::Viewport),
+    SnapToBottom(bool),
     Send,
     ReplyProgressed(reason::Event),
     ReplyReceived(Result<reason::Reply, reason::Error>),
@@ -363,7 +369,7 @@ enum Message {
     LinkClicked(markdown::Uri),
     ToolProgressed(reason::tool::Id, String),
     ToolFinished(reason::tool::Id, Result<tool::Output, reason::Error>),
-    ToolScrolled(reason::tool::Id, scrollable::Viewport),
+    ToolScrolled(reason::tool::Id, bool),
     Abort,
 }
 
@@ -463,15 +469,8 @@ impl Pick {
 
                 Task::none()
             }
-            Message::ContentScrolled(viewport) => {
-                let offset = viewport.absolute_offset();
-                let bounds = viewport.bounds();
-                let content_bounds = viewport.content_bounds();
-
-                let distance_to_bottom =
-                    (content_bounds.height - bounds.height - offset.y).max(0.0);
-
-                self.snap_to_bottom = distance_to_bottom <= SNAP_TO_BOTTOM;
+            Message::SnapToBottom(snap_to_bottom) => {
+                self.snap_to_bottom = snap_to_bottom;
 
                 Task::none()
             }
@@ -657,7 +656,7 @@ impl Pick {
                     Task::none()
                 }
             }
-            Message::ToolScrolled(id, viewport) => {
+            Message::ToolScrolled(id, snap_to_bottom) => {
                 let Some(tool) = self.messages.iter_mut().rev().find_map(|message| {
                     if let Item::Tool(tool) = message
                         && tool.call.id == id
@@ -670,14 +669,7 @@ impl Pick {
                     return Task::none();
                 };
 
-                let offset = viewport.absolute_offset();
-                let bounds = viewport.bounds();
-                let content_bounds = viewport.content_bounds();
-
-                let distance_to_bottom =
-                    (content_bounds.height - bounds.height - offset.y).max(0.0);
-
-                tool.snap_to_bottom = distance_to_bottom <= SNAP_TO_BOTTOM;
+                tool.snap_to_bottom = snap_to_bottom;
 
                 Task::none()
             }
@@ -968,12 +960,19 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                         .width(Fit.max(MAX_WIDTH))
                         .padding(padding::bottom(self.input_height + 10.0)),
                 ))
-                .on_resize(Message::ContentResized),
+                .on_resize(|size| {
+                    (size.width != self.content_width).then_some(Message::ContentResized(size))
+                }),
             )
             .id("scroll")
             .width(Fill)
             .height(Fill)
-            .on_scroll(Message::ContentScrolled)
+            .on_scroll(|viewport| {
+                let snap_to_bottom = snap_to_bottom(viewport);
+
+                (self.snap_to_bottom != snap_to_bottom)
+                    .then_some(Message::SnapToBottom(snap_to_bottom))
+            })
             .spacing(10)
             .into()
         };
@@ -1172,6 +1171,16 @@ const MAX_WIDTH: u32 = 770;
 const TOOL_LOG_LINE_HEIGHT: f32 = 18.0;
 const MAX_TOOL_LOG_HEIGHT: f32 = TOOL_LOG_LINE_HEIGHT * 10.0 + 5.0 * 9.0; // 10 lines: 10 × 18px + 9 × 5px spacing
 const SNAP_TO_BOTTOM: f32 = 20.0;
+
+fn snap_to_bottom(viewport: scrollable::Viewport) -> bool {
+    let offset = viewport.absolute_offset();
+    let bounds = viewport.bounds();
+    let content_bounds = viewport.content_bounds();
+
+    let distance_to_bottom = (content_bounds.height - bounds.height - offset.y).max(0.0);
+
+    distance_to_bottom <= SNAP_TO_BOTTOM
+}
 
 fn tildify(path: &Path, home: Option<&Path>) -> PathBuf {
     let Some(home) = home else {
