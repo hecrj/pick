@@ -166,6 +166,24 @@ mod tests {
 
     #[tokio::test]
     async fn a_non_zero_exit_is_a_notice_not_an_error() {
+        use std::process;
+
+        #[cfg(unix)]
+        use std::os::unix::process::ExitStatusExt;
+
+        #[cfg(windows)]
+        use std::os::windows::process::ExitStatusExt;
+
+        // The raw encoding of a plain "exit with code 1" differs
+        // per platform: on Unix the code sits in the high byte of
+        // the wait status, while on Windows the raw value is the
+        // code itself.
+        #[cfg(unix)]
+        let exit_one = process::ExitStatus::from_raw(1 << 8);
+
+        #[cfg(windows)]
+        let exit_one = process::ExitStatus::from_raw(1);
+
         let bash = Bash {
             command: "echo boom; exit 1".to_owned(),
         };
@@ -177,7 +195,7 @@ mod tests {
         let output = run.await.expect("command ran");
         assert_eq!(
             output.to_string(),
-            "boom\n[Command failed (exit status: 1)]"
+            format!("boom\n[Command failed ({exit_one})]"),
         );
     }
 
