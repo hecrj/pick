@@ -1,6 +1,6 @@
-use super::{Call, Future};
 use crate::file;
 use crate::highlight;
+use crate::tool::call::{self, Call};
 
 use iced::highlighter;
 use iced::widget::{column, container, rich_text, span, text};
@@ -79,12 +79,12 @@ impl Call for Write {
         })
     }
 
-    fn run(&self, project: &Path) -> Future {
+    fn run(&self, project: &Path) -> call::Run {
         let path = self.path.clone();
         let content = self.content.clone();
         let project = project.to_path_buf();
 
-        Box::pin(async move {
+        call::future(async move {
             let path = project.join(&path);
             let _lock = file::lock(&path).await;
 

@@ -23,6 +23,7 @@ function = "0.3"
 log = "0.4"
 reason = "0.2.0-dev"
 serde_json = "1"
+sipper = "0.2"
 
 [lints.clippy]
 large-enum-variant = "allow"
@@ -33,10 +34,10 @@ cosmic-text.git = "https://github.com/hecrj/cosmic-text.git"
 cosmic-text.rev = "c46a7e3d29cc43078cc77f843e8d51ad0adad118"
 
 iced.git = "https://github.com/iced-rs/iced.git"
-iced.rev = "70d27e2a523a85899e639cd9b1c84341f190b6ef"
+iced.rev = "fbf7677060b08a383bcdedc3c4e00d5651ea1a8e"
 
 reason.git = "https://github.com/hecrj/reason.git"
-reason.rev = "ff90574d30da7632c7fbce93b60ce321eee17cd2"
+reason.rev = "41f6867e4d7f155f72b526fdd94cf5b6e1771c47"
 
 # iced.path = "../iced"
 # reason.path = "../reason"

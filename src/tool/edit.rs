@@ -1,6 +1,6 @@
-use super::{Call, Future};
 use crate::file;
 use crate::highlight;
+use crate::tool::call::{self, Call};
 
 use iced::border;
 use iced::highlighter;
@@ -86,14 +86,14 @@ impl Call for Edit {
         )
     }
 
-    fn run(&self, project: &Path) -> Future {
+    fn run(&self, project: &Path) -> call::Run {
         let path = self.path.clone();
         let old_string = self.old_string.clone();
         let new_string = self.new_string.clone();
         let replace_all = self.replace_all;
         let project = project.to_path_buf();
 
-        Box::pin(async move {
+        call::future(async move {
             let path = project.join(&path);
             let _lock = file::lock(&path).await;
             let contents = tokio::fs::read_to_string(&path).await?;

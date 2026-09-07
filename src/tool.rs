@@ -1,4 +1,5 @@
 pub mod bash;
+pub mod call;
 pub mod edit;
 pub mod read;
 pub mod write;
@@ -8,43 +9,17 @@ use edit::Edit;
 use read::Read;
 use write::Write;
 
-use iced::{Element, Never};
+pub use call::Call;
 
 use serde::de::DeserializeOwned;
 
-use std::borrow::Cow;
 use std::collections::HashMap;
-use std::path::Path;
-use std::pin::Pin;
-
-type Output = ::core::result::Result<String, reason::Error>;
-pub type Future = Pin<Box<dyn std::future::Future<Output = Output> + Send>>;
 
 pub struct Tool {
     name: &'static str,
     description: &'static str,
     parameters: &'static [Parameter],
     parse: Box<dyn Fn(&str) -> Result<Box<dyn Call>, reason::Error>>,
-}
-
-pub trait Call {
-    /// Executes the call and returns its result.
-    ///
-    /// The returned string is fed back to the model as the tool's
-    /// response. Keep tool commentary and content distinguishable with a
-    /// bracket convention: wrap any message the tool itself generates —
-    /// diagnostics, truncation notices, confirmations — in `[...]`, and
-    /// return verbatim content (file contents, command output)
-    /// unbracketed.
-    fn run(&self, project: &Path) -> Future;
-
-    fn title(&self) -> Option<Cow<'_, str>> {
-        None
-    }
-
-    fn view(&self) -> Option<Element<'_, Never>> {
-        None
-    }
 }
 
 impl Tool {

@@ -1,5 +1,5 @@
-use super::{Call, Future};
 use crate::file;
+use crate::tool::call::{self, Call};
 
 use serde::Deserialize;
 use tokio::io::AsyncReadExt;
@@ -42,13 +42,13 @@ impl Call for Read {
         Some(format!("{}{offset}", self.path).into())
     }
 
-    fn run(&self, project: &Path) -> Future {
+    fn run(&self, project: &Path) -> call::Run {
         let path = self.path.clone();
         let offset = self.offset;
         let limit = self.limit;
         let project = project.to_path_buf();
 
-        Box::pin(async move {
+        call::future(async move {
             let offset = match offset {
                 Some(offset) if offset > 0 => offset,
                 Some(_) => Err(std::io::Error::other(

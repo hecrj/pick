@@ -137,10 +137,32 @@ impl Item {
                     Err(error) => Some(text!("{error}").size(SMALL).style(text::danger).into()),
                 };
 
-                let output = tool.status.content().map(|content| {
-                    let content = content.trim();
+                let output: Option<Element<'_, _>> = if let Status::Running { logs: log } =
+                    &tool.status
+                {
+                    Some(
+                        scrollable(
+                            column(log.iter().map(|line| {
+                                text(&line[..line.floor_char_boundary(200)])
+                                    .wrapping(text::Wrapping::None)
+                                    .ellipsis(text::Ellipsis::End)
+                                    .size(SMALL)
+                                    .line_height(Pixels(TOOL_LOG_LINE_HEIGHT))
+                                    .into()
+                            }))
+                            .spacing(5),
+                        )
+                        .id(tool.call.id.as_str().to_owned())
+                        .width(Fill)
+                        .height(Fit.max(MAX_TOOL_LOG_HEIGHT))
+                        .on_scroll(|viewport| Message::ToolScrolled(tool.call.id.clone(), viewport))
+                        .spacing(10)
+                        .into(),
+                    )
+                } else {
+                    tool.status.content().map(|content| {
+                        let content = content.trim();
 
-                    container(
                         if content.len() > 50 {
                             text(format!(
                                 "{}...",
@@ -153,23 +175,30 @@ impl Item {
                                 content
                             })
                         }
-                        .size(SMALL),
-                    )
-                    .width(Fill)
-                    .padding(10)
-                    .style(|theme: &Theme| {
-                        let palette = theme.seed();
-
-                        let color = match tool.status {
-                            Status::Running => palette.warning,
-                            Status::Success(_) => palette.success.scale_alpha(0.5),
-                            Status::Invalid | Status::Aborted | Status::Error(_) => palette.danger,
-                        };
-
-                        let mut style = container::dark(theme);
-                        style.border = style.border.color(color).width(1);
-                        style
+                        .size(SMALL)
+                        .into()
                     })
+                };
+
+                let output = output.map(|output| {
+                    container(output)
+                        .width(Fill)
+                        .padding(10)
+                        .style(|theme: &Theme| {
+                            let palette = theme.seed();
+
+                            let color = match tool.status {
+                                Status::Running { .. } => palette.warning,
+                                Status::Success(_) => palette.success.scale_alpha(0.5),
+                                Status::Invalid | Status::Aborted | Status::Error(_) => {
+                                    palette.danger
+                                }
+                            };
+
+                            let mut style = container::dark(theme);
+                            style.border = style.border.color(color).width(1);
+                            style
+                        })
                 });
 
                 container(column![header, arguments, output].spacing(10))
@@ -241,11 +270,12 @@ struct ToolRun {
     call: reason::tool::Call,
     state: Result<Box<dyn tool::Call>, reason::Error>,
     status: Status,
+    snap_to_bottom: bool,
 }
 
 #[derive(Debug)]
 enum Status {
-    Running,
+    Running { logs: Vec<String> },
     Success(String),
     Error(String),
     Invalid,
@@ -255,7 +285,7 @@ enum Status {
 impl Status {
     fn content(&self) -> Option<&str> {
         match self {
-            Status::Running => None,
+            Status::Running { .. } => None, // Never send intermediate progress
             Status::Success(output) | Status::Error(output) => Some(output.as_str()),
             Status::Invalid => Some("[invalid tool call]"),
             Status::Aborted => Some("[execution aborted]"),
@@ -293,7 +323,9 @@ enum Message {
     CompactionProgressed(reason::Event),
     CompactionReceived(Result<reason::Reply, reason::Error>),
     LinkClicked(markdown::Uri),
+    ToolProgressed(reason::tool::Id, String),
     ToolFinished(reason::tool::Id, Result<String, reason::Error>),
+    ToolScrolled(reason::tool::Id, scrollable::Viewport),
     Abort,
 }
 
@@ -562,8 +594,57 @@ impl Pick {
 
                 Task::none()
             }
+            Message::ToolProgressed(id, line) => {
+                let Some(tool) = self.messages.iter_mut().rev().find_map(|message| {
+                    if let Item::Tool(tool) = message
+                        && tool.call.id == id
+                    {
+                        Some(tool)
+                    } else {
+                        None
+                    }
+                }) else {
+                    return Task::none();
+                };
+
+                let Status::Running { logs: log } = &mut tool.status else {
+                    return Task::none();
+                };
+
+                log.push(line);
+
+                if tool.snap_to_bottom {
+                    operation::snap_to_end(tool.call.id.as_str().to_owned())
+                } else {
+                    Task::none()
+                }
+            }
+            Message::ToolScrolled(id, viewport) => {
+                let Some(tool) = self.messages.iter_mut().rev().find_map(|message| {
+                    if let Item::Tool(tool) = message
+                        && tool.call.id == id
+                    {
+                        Some(tool)
+                    } else {
+                        None
+                    }
+                }) else {
+                    return Task::none();
+                };
+
+                let offset = viewport.absolute_offset();
+                let bounds = viewport.bounds();
+                let content_bounds = viewport.content_bounds();
+
+                let distance_to_bottom =
+                    (content_bounds.height - bounds.height - offset.y).max(0.0);
+
+                tool.snap_to_bottom = distance_to_bottom <= SNAP_TO_BOTTOM;
+
+                Task::none()
+            }
             Message::ToolFinished(id, result) => {
-                let Some(tool) = self.messages.iter_mut().find_map(|message| {
+                let Some(tool) = self.messages.iter_mut().rev().find_map(|message| {
                     if let Item::Tool(tool) = message
                         && tool.call.id == id
                     {
@@ -616,7 +697,7 @@ impl Pick {
 
         for message in &mut self.messages {
             if let Item::Tool(tool) = message
-                && matches!(tool.status, Status::Running)
+                && matches!(tool.status, Status::Running { .. })
             {
                 tool.status = Status::Aborted;
             }
@@ -693,15 +774,19 @@ impl Pick {
 
         let (run, status) = match &state {
             Ok(state) => {
-                let future = state.run(&self.project);
+                let run = state.run(&self.project);
 
-                let (run, handle) =
-                    Task::perform(future, Message::ToolFinished.with(call.id.clone())).abortable();
+                let (run, handle) = Task::sip(
+                    run,
+                    Message::ToolProgressed.with(call.id.clone()),
+                    Message::ToolFinished.with(call.id.clone()),
+                )
+                .abortable();
 
                 self.tasks
                     .insert(Work::Tool(call.id.clone()), handle.abort_on_drop());
 
-                (run, Status::Running)
+                (run, Status::Running { logs: Vec::new() })
             }
             Err(_error) => (Task::none(), Status::Invalid),
         };
@@ -710,6 +795,7 @@ impl Pick {
             call,
             state,
             status,
+            snap_to_bottom: true,
         }));
 
         run
@@ -1043,6 +1129,8 @@ const TITLE: u32 = 20;
 const NORMAL: u32 = 16;
 const SMALL: u32 = 14;
 const MAX_WIDTH: u32 = 770;
+const TOOL_LOG_LINE_HEIGHT: f32 = 18.0;
+const MAX_TOOL_LOG_HEIGHT: f32 = TOOL_LOG_LINE_HEIGHT * 10.0 + 5.0 * 9.0; // 10 lines: 10 × 18px + 9 × 5px spacing
 const SNAP_TO_BOTTOM: f32 = 20.0;
 
 fn tildify(path: &Path, home: Option<&Path>) -> PathBuf {
