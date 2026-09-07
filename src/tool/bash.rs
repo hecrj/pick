@@ -30,9 +30,10 @@ impl Call for Bash {
         let project = project.to_path_buf();
 
         call::straw(async move |mut sender| {
+            let shell = shell().await?;
             let command = format!("exec 2>&1; {}", command);
 
-            let mut child = tokio::process::Command::new("bash")
+            let mut child = tokio::process::Command::new(shell)
                 .args(["-c", &command])
                 .current_dir(project)
                 .kill_on_drop(true)
@@ -59,6 +60,58 @@ impl Call for Bash {
             Ok(output)
         })
     }
+}
+
+/// Resolves the `bash` binary that runs the command.
+///
+/// On Windows the `bash` on the PATH may be the WSL stub, which
+/// cannot run commands when no distribution is installed, so the
+/// candidates are tried in turn and only a shell that can actually
+/// run a command is trusted.
+#[cfg(not(windows))]
+async fn shell() -> Result<&'static str, std::io::Error> {
+    Ok("bash")
+}
+
+#[cfg(windows)]
+async fn shell() -> Result<&'static str, std::io::Error> {
+    /// The `bash` binary, cached for the life of the process: a
+    /// user's bash installation is not expected to change while
+    /// the program runs. Failures are not cached, so a bash
+    /// installed mid-session is picked up by the next call.
+    static SHELL: tokio::sync::OnceCell<&'static str> = tokio::sync::OnceCell::const_new();
+
+    if let Some(shell) = SHELL.get() {
+        return Ok(*shell);
+    }
+
+    const CANDIDATES: &[&str] = &[
+        "bash",
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+    ];
+
+    for candidate in CANDIDATES {
+        // A `bash` that cannot run a trivial command — like the WSL
+        // stub without a distribution — is not one.
+        let usable = tokio::process::Command::new(candidate)
+            .args(["-c", "true"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .is_ok_and(|status| status.success());
+
+        if usable {
+            // A concurrent call may cache the same shell first.
+            SHELL.set(*candidate).ok();
+            return Ok(*candidate);
+        }
+    }
+
+    Err(std::io::Error::other(
+        "no usable bash found; install Git for Windows or a WSL distribution",
+    ))
 }
 
 #[cfg(test)]
