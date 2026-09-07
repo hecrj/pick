@@ -1,5 +1,6 @@
 use crate::file;
 use crate::highlight;
+use crate::tool::Output;
 use crate::tool::call::{self, Call};
 
 use iced::highlighter;
@@ -90,7 +91,10 @@ impl Call for Write {
 
             tokio::fs::write(&path, content).await?;
 
-            Ok(format!("[Wrote to {}]", path.display()))
+            let mut output = Output::new();
+            output.push_notice(format!("Wrote to {}", path.display()));
+
+            Ok(output)
         })
     }
 }

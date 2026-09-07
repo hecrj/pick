@@ -1,6 +1,7 @@
 pub mod bash;
 pub mod call;
 pub mod edit;
+pub mod output;
 pub mod read;
 pub mod write;
 
@@ -10,6 +11,7 @@ use read::Read;
 use write::Write;
 
 pub use call::Call;
+pub use output::Output;
 
 use serde::de::DeserializeOwned;
 

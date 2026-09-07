@@ -1,3 +1,4 @@
+use crate::tool::Output;
 use crate::tool::call::{self, Call};
 
 use iced::widget::{container, text};
@@ -41,22 +42,21 @@ impl Call for Bash {
             let stdout = child.stdout.take().expect("stdout is piped");
             let mut lines = tokio::io::BufReader::new(stdout).lines();
 
-            let mut output = String::new();
+            let mut output = Output::new();
 
             while let Some(line) = lines.next_line().await? {
-                output.push_str(&line);
-                output.push('\n');
+                output.push(line.clone());
 
                 sender.send(line).await;
             }
 
             let status = child.wait().await?;
 
-            if status.success() {
-                Ok(output)
-            } else {
-                Err(std::io::Error::other(format!("{status}\n{output}",)))?
+            if !status.success() {
+                output.push_notice(format!("Command failed ({status})"));
             }
+
+            Ok(output)
         })
     }
 }
@@ -82,11 +82,37 @@ mod tests {
         assert_eq!(lines, ["one", "two", "three"]);
 
         let output = run.await.expect("command succeeded");
-        assert_eq!(output, "one\ntwo\nthree\n");
+        assert_eq!(output.to_string(), "one\ntwo\nthree");
     }
 
     #[tokio::test]
-    async fn failure_includes_output() {
+    async fn long_output_is_capped_to_its_head_and_tail() {
+        let bash = Bash {
+            command: "for ((i=1; i<=1500; i++)); do echo $i; done".to_owned(),
+        };
+
+        let mut run = bash.run(Path::new("."));
+
+        let mut streamed = 0;
+        while run.sip().await.is_some() {
+            streamed += 1;
+        }
+
+        assert_eq!(streamed, 1_500);
+
+        let output = run.await.expect("command succeeded");
+
+        assert_eq!(output.lines(), 1_500);
+        assert_eq!(output.lines_ellided(), 500);
+
+        let rendered = output.to_string();
+        assert!(rendered.starts_with("1\n2\n"));
+        assert!(rendered.contains("500\n[... 500 lines elided]\n1001"));
+        assert!(rendered.ends_with("\n1499\n1500"));
+    }
+
+    #[tokio::test]
+    async fn a_non_zero_exit_is_a_notice_not_an_error() {
         let bash = Bash {
             command: "echo boom; exit 1".to_owned(),
         };
@@ -95,7 +121,38 @@ mod tests {
 
         while run.sip().await.is_some() {}
 
-        let error = run.await.expect_err("command failed");
-        assert!(error.to_string().contains("boom"));
+        let output = run.await.expect("command ran");
+        assert_eq!(
+            output.to_string(),
+            "boom\n[Command failed (exit status: 1)]"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_command_without_output_yields_an_empty_output() {
+        let bash = Bash {
+            command: "true".to_owned(),
+        };
+
+        let mut run = bash.run(Path::new("."));
+
+        while run.sip().await.is_some() {}
+
+        let output = run.await.expect("command ran");
+        assert!(output.to_string().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_signaled_command_is_reported_as_a_notice() {
+        let bash = Bash {
+            command: "kill -9 $$".to_owned(),
+        };
+
+        let mut run = bash.run(Path::new("."));
+
+        while run.sip().await.is_some() {}
+
+        let output = run.await.expect("command ran");
+        assert!(output.to_string().contains("signal: 9"));
     }
 }

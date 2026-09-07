@@ -80,7 +80,7 @@ impl Item {
             }),
             Item::Tool(tool) => reason::Message::Tool(reason::tool::Response {
                 id: tool.call.id.clone(),
-                content: tool.status.content().unwrap_or_default().to_owned(),
+                content: tool.status.content().unwrap_or_default(),
             }),
             Item::Compaction { .. } => None?,
         })
@@ -137,12 +137,10 @@ impl Item {
                     Err(error) => Some(text!("{error}").size(SMALL).style(text::danger).into()),
                 };
 
-                let output: Option<Element<'_, _>> = if let Status::Running { logs: log } =
-                    &tool.status
-                {
-                    Some(
+                let output: Option<Element<'_, _>> = match &tool.status {
+                    Status::Running { logs } => Some(
                         scrollable(
-                            column(log.iter().map(|line| {
+                            column(logs.iter().map(|line| {
                                 text(&line[..line.floor_char_boundary(200)])
                                     .wrapping(text::Wrapping::None)
                                     .ellipsis(text::Ellipsis::End)
@@ -158,26 +156,65 @@ impl Item {
                         .on_scroll(|viewport| Message::ToolScrolled(tool.call.id.clone(), viewport))
                         .spacing(10)
                         .into(),
-                    )
-                } else {
-                    tool.status.content().map(|content| {
-                        let content = content.trim();
+                    ),
+                    Status::Success { output } if output.lines() > 0 => {
+                        /// The first and last lines a long finished output
+                        /// keeps; the middle is elided
+                        const HEAD: usize = 4;
+                        const TAIL: usize = 5;
 
-                        if content.len() > 50 {
-                            text(format!(
-                                "{}...",
-                                &content[0..content.floor_char_boundary(50)]
-                            ))
-                        } else {
-                            text(if content.is_empty() {
-                                "[No output]"
-                            } else {
-                                content
-                            })
+                        fn line<'a>(line: &'a str) -> Element<'a, Message> {
+                            text(&line[..line.floor_char_boundary(200)])
+                                .wrapping(text::Wrapping::None)
+                                .ellipsis(text::Ellipsis::End)
+                                .size(SMALL)
+                                .into()
                         }
+
+                        let total = output.lines();
+
+                        Some(
+                            if total > HEAD + TAIL {
+                                let elided = total - HEAD - TAIL;
+
+                                let marker = match elided {
+                                    1 => "... 1 line elided".to_owned(),
+                                    elided => {
+                                        format!("... {} lines elided", thousands(elided as u64))
+                                    }
+                                };
+
+                                column(
+                                    output
+                                        .head(HEAD)
+                                        .map(line)
+                                        .chain(std::iter::once(
+                                            text(marker).size(SMALL).style(text::secondary).into(),
+                                        ))
+                                        .chain(output.tail(TAIL).map(line)),
+                                )
+                                .spacing(5)
+                            } else {
+                                column(output.all().map(line))
+                            }
+                            .spacing(5)
+                            .into(),
+                        )
+                    }
+                    Status::Success { .. }
+                    | Status::Error { .. }
+                    | Status::Invalid
+                    | Status::Aborted => tool.status.content().map(|content| {
+                        let trimmed = content.trim();
+
+                        text(if trimmed.is_empty() {
+                            "[No output]".to_owned()
+                        } else {
+                            trimmed.to_owned()
+                        })
                         .size(SMALL)
                         .into()
-                    })
+                    }),
                 };
 
                 let output = output.map(|output| {
@@ -189,8 +226,8 @@ impl Item {
 
                             let color = match tool.status {
                                 Status::Running { .. } => palette.warning,
-                                Status::Success(_) => palette.success.scale_alpha(0.5),
-                                Status::Invalid | Status::Aborted | Status::Error(_) => {
+                                Status::Success { .. } => palette.success.scale_alpha(0.5),
+                                Status::Invalid | Status::Aborted | Status::Error { .. } => {
                                     palette.danger
                                 }
                             };
@@ -276,19 +313,20 @@ struct ToolRun {
 #[derive(Debug)]
 enum Status {
     Running { logs: Vec<String> },
-    Success(String),
-    Error(String),
+    Success { output: tool::Output },
+    Error { output: String },
     Invalid,
     Aborted,
 }
 
 impl Status {
-    fn content(&self) -> Option<&str> {
+    fn content(&self) -> Option<String> {
         match self {
             Status::Running { .. } => None, // Never send intermediate progress
-            Status::Success(output) | Status::Error(output) => Some(output.as_str()),
-            Status::Invalid => Some("[invalid tool call]"),
-            Status::Aborted => Some("[execution aborted]"),
+            Status::Success { output } => Some(output.to_string()),
+            Status::Error { output } => Some(output.clone()),
+            Status::Invalid => Some("[invalid tool call]".to_owned()),
+            Status::Aborted => Some("[execution aborted]".to_owned()),
         }
     }
 }
@@ -324,7 +362,7 @@ enum Message {
     CompactionReceived(Result<reason::Reply, reason::Error>),
     LinkClicked(markdown::Uri),
     ToolProgressed(reason::tool::Id, String),
-    ToolFinished(reason::tool::Id, Result<String, reason::Error>),
+    ToolFinished(reason::tool::Id, Result<tool::Output, reason::Error>),
     ToolScrolled(reason::tool::Id, scrollable::Viewport),
     Abort,
 }
@@ -607,11 +645,11 @@ impl Pick {
                     return Task::none();
                 };
 
-                let Status::Running { logs: log } = &mut tool.status else {
+                let Status::Running { logs } = &mut tool.status else {
                     return Task::none();
                 };
 
-                log.push(line);
+                logs.push(line);
 
                 if tool.snap_to_bottom {
                     operation::snap_to_end(tool.call.id.as_str().to_owned())
@@ -658,13 +696,15 @@ impl Pick {
 
                 let _ = self.tasks.remove(&Work::Tool(id));
 
-                if matches!(tool.status, Status::Aborted) {
+                if !matches!(tool.status, Status::Running { .. }) {
                     return Task::none();
                 }
 
                 tool.status = match result {
-                    Ok(output) => Status::Success(output),
-                    Err(error) => Status::Error(error.to_string()),
+                    Ok(output) => Status::Success { output },
+                    Err(error) => Status::Error {
+                        output: error.to_string(),
+                    },
                 };
 
                 if self.tasks.is_empty() {

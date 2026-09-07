@@ -1,5 +1,6 @@
 use crate::file;
 use crate::highlight;
+use crate::tool::Output;
 use crate::tool::call::{self, Call};
 
 use iced::border;
@@ -132,15 +133,14 @@ impl Call for Edit {
 
             tokio::fs::write(&path, updated).await?;
 
-            if replace_all {
-                Ok(format!(
-                    "[Edited {} ({} replacements)]",
-                    path.display(),
-                    occurrences
-                ))
+            let mut output = Output::new();
+            output.push_notice(if replace_all {
+                format!("Edited {} ({} replacements)", path.display(), occurrences)
             } else {
-                Ok(format!("[Edited {} (1 replacement)]", path.display()))
-            }
+                format!("Edited {} (1 replacement)", path.display())
+            });
+
+            Ok(output)
         })
     }
 }

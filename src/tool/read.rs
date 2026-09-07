@@ -1,4 +1,5 @@
 use crate::file;
+use crate::tool::Output;
 use crate::tool::call::{self, Call};
 
 use serde::Deserialize;
@@ -81,7 +82,7 @@ impl Call for Read {
             let mut terminated_lines = 0u64;
             let mut emitted = 0u64;
             let mut pending = Vec::new();
-            let mut output = String::new();
+            let mut output = Output::new();
 
             loop {
                 let n = file.read(&mut chunk).await?;
@@ -106,9 +107,9 @@ impl Call for Read {
                                 pending.pop();
                             }
 
-                            let line = String::from_utf8_lossy(&pending);
+                            let line = String::from_utf8_lossy(&pending).into_owned();
 
-                            if (output.len() + line.len() + 1) as u64 > MAX_OUTPUT_BYTES {
+                            if (output.bytes() + line.len() + 1) as u64 > MAX_OUTPUT_BYTES {
                                 // This line would push the output past
                                 // the limit; stop before emitting it, so
                                 // the output stays within the limit.
@@ -116,8 +117,7 @@ impl Call for Read {
                                 break;
                             }
 
-                            output.push_str(&line);
-                            output.push('\n');
+                            output.push(line);
                             emitted += 1;
                         }
 
@@ -163,28 +163,27 @@ impl Call for Read {
                     pending.pop();
                 }
 
-                let line = String::from_utf8_lossy(&pending);
+                let line = String::from_utf8_lossy(&pending).into_owned();
 
-                if (output.len() + line.len() + 1) as u64 > MAX_OUTPUT_BYTES {
+                if (output.bytes() + line.len() + 1) as u64 > MAX_OUTPUT_BYTES {
                     // The final line would push the output past the limit.
                     stop = Stop::OutputLimit;
                 } else if terminated_lines + 1 >= offset {
-                    output.push_str(&line);
-                    output.push('\n');
+                    output.push(line);
                     emitted += 1;
                 }
 
                 terminated_lines += 1;
             }
 
-            if output.is_empty() {
-                return Ok(match stop {
+            if output.lines() == 0 {
+                output.push_notice(match stop {
                     Stop::EndOfFile => {
                         if terminated_lines == 0 {
-                            "[File is empty]".to_owned()
+                            "File is empty".to_owned()
                         } else {
                             format!(
-                                "[File has {} line{}; offset {} is past the end]",
+                                "File has {} line{}; offset {} is past the end",
                                 terminated_lines,
                                 if terminated_lines == 1 { "" } else { "s" },
                                 offset
@@ -192,44 +191,52 @@ impl Call for Read {
                         }
                     }
                     Stop::OutputLimit => format!(
-                        "[The first line in range exceeds the {MAX_OUTPUT_BYTES} \
-                        byte output limit; inspect the file with bash]"
+                        "The first line in range exceeds the {MAX_OUTPUT_BYTES} \
+                        byte output limit; inspect the file with bash"
                     ),
                     _ => format!(
-                        "[No complete lines could be read after scanning {scanned} \
-                        bytes; the file's lines may be very long]"
+                        "No complete lines could be read after scanning {scanned} \
+                        bytes; the file's lines may be very long"
                     ),
                 });
+
+                return Ok(output);
             }
 
             match stop {
                 Stop::EndOfFile => Ok(output),
                 Stop::LineLimit { has_more } => {
                     if has_more {
-                        Ok(format!(
-                            "{output}\n[File has more lines; continue reading with offset={}]",
+                        output.push_notice(format!(
+                            "File has more lines; continue reading with offset={}",
                             offset + emitted
-                        ))
-                    } else {
-                        Ok(output)
+                        ));
                     }
+
+                    Ok(output)
                 }
                 Stop::OutputLimit => {
-                    let out = output.len();
+                    let out = output.bytes();
 
-                    Ok(format!(
-                        "{output}\n[Read stopped after {out} bytes of output \
+                    output.push_notice(format!(
+                        "Read stopped after {out} bytes of output \
                         (limit {MAX_OUTPUT_BYTES}); continue reading with \
-                        offset={}, or inspect the file with bash]",
+                        offset={}, or inspect the file with bash",
                         offset + emitted
-                    ))
+                    ));
+
+                    Ok(output)
                 }
-                Stop::ByteLimit => Ok(format!(
-                    "{output}\n[Read stopped after scanning {scanned} bytes; \
-                    some lines may be very long. Continue reading with \
-                    offset={}, or inspect the file with bash]",
-                    offset + emitted
-                )),
+                Stop::ByteLimit => {
+                    output.push_notice(format!(
+                        "Read stopped after scanning {scanned} bytes; \
+                        some lines may be very long. Continue reading with \
+                        offset={}, or inspect the file with bash",
+                        offset + emitted
+                    ));
+
+                    Ok(output)
+                }
             }
         })
     }
@@ -271,14 +278,14 @@ mod tests {
             limit,
         };
 
-        read.run(project).await.unwrap()
+        read.run(project).await.unwrap().to_string()
     }
 
     #[tokio::test]
     async fn reads_small_files_in_full() {
         let root = project("small", &[("small.txt", "a\nb\nc"), ("empty.txt", "")]);
 
-        assert_eq!(read("small.txt", &root).await, "a\nb\nc\n");
+        assert_eq!(read("small.txt", &root).await, "a\nb\nc");
         assert_eq!(read("empty.txt", &root).await, "[File is empty]");
 
         std::fs::remove_dir_all(&root).unwrap();
@@ -298,7 +305,7 @@ mod tests {
         let root = project("fits", &[("fitting.txt", &contents)]);
         let output = read("fitting.txt", &root).await;
 
-        assert_eq!(output, contents);
+        assert_eq!(output, contents.trim_end_matches('\n'));
 
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -317,7 +324,7 @@ mod tests {
         let root = project("exact", &[("exact.txt", &contents)]);
         let output = read("exact.txt", &root).await;
 
-        assert_eq!(output, contents);
+        assert_eq!(output, contents.trim_end_matches('\n'));
 
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -391,8 +398,9 @@ mod tests {
         );
 
         assert!(output.ends_with(&notice));
-        // 655 lines of 100 bytes, plus the newline before the notice.
-        assert_eq!(output.len(), 655 * 100 + 1 + notice.len());
+        // 655 lines of 99 characters, joined by newlines, plus the
+        // newline before the notice.
+        assert_eq!(output.len(), 655 * 100 + notice.len());
 
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -414,9 +422,10 @@ mod tests {
 
         // Lines 700 through 1200 are returned in full, with no notice.
         assert!(output.starts_with("line-0700"));
-        assert!(output.ends_with(&format!("{}\n", "x".repeat(90))));
+        assert!(output.ends_with(&"x".repeat(90)));
         assert!(!output.contains('['));
-        assert_eq!(output.len(), 501 * 100);
+        // 501 lines of 99 characters, no trailing newline.
+        assert_eq!(output.len(), 501 * 99 + 500);
 
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -476,7 +485,7 @@ mod tests {
         assert_eq!(
             output,
             format!(
-                "{small}\n[Read stopped after {} bytes of output \
+                "hello\n[Read stopped after {} bytes of output \
                 (limit {MAX_OUTPUT_BYTES}); continue reading with \
                 offset=2, or inspect the file with bash]",
                 small.len()
