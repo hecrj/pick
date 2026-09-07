@@ -33,6 +33,7 @@ fn main() -> Result<(), iced::Error> {
         Pick::update,
         Pick::view,
     )
+    .title("pick")
     .subscription(Pick::subscription)
     .theme(Theme::CatppuccinMocha)
     .font(Font::MONOSPACE)
