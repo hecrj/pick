@@ -1,17 +1,21 @@
 mod file;
 mod highlight;
+mod markdown;
 mod tool;
 
+use crate::markdown::Markdown;
 use crate::tool::Tool;
 
+use iced::border;
+use iced::font;
 use iced::keyboard;
 use iced::padding;
 use iced::task;
 use iced::time;
 use iced::widget::operation;
 use iced::widget::{
-    bottom, center, center_x, column, container, markdown, progress_bar, right, row, scrollable,
-    sensor, space, stack, text, text_editor,
+    bottom, center, center_x, column, container, progress_bar, right, row, scrollable, sensor,
+    space, stack, text, text_editor,
 };
 use iced::{Center, Element, Fill, Fit, Font, Pixels, Size, Subscription, Task, Theme, never};
 
@@ -73,10 +77,10 @@ enum Item {
 impl Item {
     fn to_message(&self) -> Option<reason::Message> {
         Some(match self {
-            Item::User(markdown) => reason::Message::User(markdown.raw.clone()),
+            Item::User(markdown) => reason::Message::User(markdown.raw().to_owned()),
             Item::Assistant(reply) => reason::Message::Assistant(reason::Reply {
-                reasoning: reply.reasoning.raw.clone(),
-                content: reply.content.raw.clone(),
+                reasoning: reply.reasoning.raw().to_owned(),
+                content: reply.content.raw().to_owned(),
                 tool_calls: reply.tool_calls.clone(),
             }),
             Item::Tool(tool) => reason::Message::Tool(reason::tool::Response {
@@ -90,14 +94,49 @@ impl Item {
     fn view(&self) -> Element<'_, Message> {
         match self {
             Item::Assistant(reply) => {
-                let reasoning = if !reply.reasoning.raw.is_empty() {
+                let reasoning = if !reply.reasoning.is_empty() {
+                    const MAX_HEIGHT: f32 = SMALL as f32 * 1.5 * 8.0; // 5 lines
+
+                    let is_done = !reply.content.is_empty() || !reply.tool_calls.is_empty();
+
                     Some(
-                        container(reply.reasoning.view(Font::MONOSPACE, NORMAL)).style(|theme| {
-                            container::Style {
-                                text_color: Some(theme.palette().secondary.strong.color),
-                                ..container::transparent(theme)
-                            }
-                        }),
+                        container(
+                            column![
+                                match reply.timings {
+                                    Some(timings) => {
+                                        if is_done {
+                                            text!("Thought for {}", duration(timings.reasoning))
+                                        } else {
+                                            text!("Thinking... ({})", duration(timings.reasoning))
+                                        }
+                                    }
+                                    None => {
+                                        text(if is_done { "Thought" } else { "Thinking..." })
+                                    }
+                                }
+                                .size(SMALL)
+                                .font(Font {
+                                    weight: font::Weight::Bold,
+                                    ..Font::MONOSPACE
+                                }),
+                                scrollable(
+                                    markdown::view(reply.reasoning.items(), Font::MONOSPACE, SMALL)
+                                        .map(Message::LinkClicked),
+                                )
+                                .width(Fill)
+                                .height(Fit.max(MAX_HEIGHT))
+                                .spacing(10)
+                                .anchor_bottom()
+                            ]
+                            .spacing(10),
+                        )
+                        .style(|theme| container::Style {
+                            text_color: Some(theme.palette().secondary.strong.color),
+                            background: Some(theme.palette().background.weakest.color.into()),
+                            border: border::rounded(5),
+                            ..container::transparent(theme)
+                        })
+                        .padding(10),
                     )
                 } else {
                     None
@@ -106,16 +145,23 @@ impl Item {
                 column![
                     prompt_progress(reply.prompt),
                     reasoning,
-                    (!reply.content.raw.is_empty())
-                        .then(|| reply.content.view(Font::DEFAULT, NORMAL)),
+                    (!reply.content.is_empty()).then(|| markdown::view(
+                        reply.content.items(),
+                        Font::DEFAULT,
+                        NORMAL
+                    )
+                    .map(Message::LinkClicked)),
                 ]
                 .spacing(10)
                 .into()
             }
             Item::User(message) => right(
-                container(message.view(Font::DEFAULT, NORMAL))
-                    .padding(10)
-                    .style(container::rounded_box),
+                container(
+                    markdown::view(message.items(), Font::DEFAULT, NORMAL)
+                        .map(Message::LinkClicked),
+                )
+                .padding(10)
+                .style(container::rounded_box),
             )
             .into(),
             Item::Tool(tool) => {
@@ -254,7 +300,7 @@ impl Item {
             Item::Compaction(compaction) => {
                 let notice = center_x(text(if compaction.is_finished {
                     format!("Compacted into {} tokens", compaction.tokens)
-                } else if compaction.reply.content.raw.is_empty() {
+                } else if compaction.reply.content.is_empty() {
                     format!("Analyzing... {} tokens", compaction.reasoning_tokens)
                 } else {
                     format!("Compacting... {} tokens", compaction.tokens)
@@ -265,39 +311,6 @@ impl Item {
                     .into()
             }
         }
-    }
-}
-
-#[derive(Debug, Default)]
-struct Markdown {
-    raw: String,
-    content: markdown::Content,
-}
-
-impl Markdown {
-    fn new(raw: String) -> Self {
-        Self {
-            content: markdown::Content::parse(&raw),
-            raw,
-        }
-    }
-
-    fn push_str(&mut self, delta: &str) {
-        self.raw.push_str(delta);
-        self.content.push_str(delta);
-    }
-
-    fn view(&self, font: Font, size: impl Into<Pixels>) -> Element<'_, Message> {
-        markdown(
-            self.content.items(),
-            markdown::Settings {
-                font,
-                ..markdown::Settings::with_text_size(size)
-            }
-            .line_height(1.5),
-            Theme::CatppuccinMocha,
-        )
-        .map(Message::LinkClicked)
     }
 }
 
@@ -1123,7 +1136,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
             The user wants your help to develop a project in the current directory.";
 
         if let Some(compaction) = self.last_compaction() {
-            format!("{PROMPT}\n\n{}", compaction.reply.content.raw)
+            format!("{PROMPT}\n\n{}", compaction.reply.content.raw())
         } else {
             PROMPT.to_owned()
         }
@@ -1143,7 +1156,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                     .rev()
                     .find(|item| matches!(item, Item::User(_)))
             {
-                Some(reason::Message::User(markdown.raw.clone()))
+                Some(reason::Message::User(markdown.raw().to_owned()))
             } else {
                 None
             },
@@ -1334,6 +1347,26 @@ fn thousands(value: u64) -> String {
     }
 
     formatted
+}
+
+fn duration(duration: time::Duration) -> String {
+    let seconds = duration.as_secs_f64();
+
+    if seconds < 1.0 {
+        format!("{}ms", duration.as_millis())
+    } else if seconds < 60.0 {
+        format!("{seconds:.1}s")
+    } else {
+        let total = seconds.round() as u64;
+        let (hours, minutes) = (total / 3600, (total % 3600) / 60);
+        let seconds = total % 60;
+
+        if hours > 0 {
+            format!("{hours}h {minutes}m {seconds}s")
+        } else {
+            format!("{minutes}m {seconds}s")
+        }
+    }
 }
 
 fn prompt_progress<'a>(progress: reason::Progress) -> Option<Element<'a, Message>> {
