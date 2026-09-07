@@ -160,8 +160,8 @@ impl Item {
                     Status::Success { output } if output.lines() > 0 => {
                         /// The first and last lines a long finished output
                         /// keeps; the middle is elided
-                        const HEAD: usize = 4;
-                        const TAIL: usize = 5;
+                        const HEAD: usize = 2;
+                        const TAIL: usize = 3;
 
                         fn line<'a>(line: &'a str) -> Element<'a, Message> {
                             text(&line[..line.floor_char_boundary(200)])

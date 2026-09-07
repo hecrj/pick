@@ -82,7 +82,7 @@ impl Call for Read {
             let mut terminated_lines = 0u64;
             let mut emitted = 0u64;
             let mut pending = Vec::new();
-            let mut output = Output::new();
+            let mut output = Output::with_cap(limit as usize);
 
             loop {
                 let n = file.read(&mut chunk).await?;
@@ -244,7 +244,7 @@ impl Call for Read {
 
 #[cfg(test)]
 mod tests {
-    use super::{Call, MAX_OUTPUT_BYTES, MAX_READ_BYTES, READ_CHUNK_SIZE, Read};
+    use super::{Call, MAX_OUTPUT_BYTES, MAX_READ_BYTES, MAX_READ_LIMIT, READ_CHUNK_SIZE, Read};
     use std::path::{Path, PathBuf};
 
     /// Creates a temporary project directory holding the given files.
@@ -504,6 +504,9 @@ mod tests {
 
         assert!(output.starts_with("line 1\n"));
         assert!(output.contains("line 1000\n"));
+        // 1,001 lines at the default limit fit the raised cap, so no
+        // middle lines are elided.
+        assert!(!output.contains("elided"));
         assert!(output.ends_with("[File has more lines; continue reading with offset=1001]"));
 
         std::fs::remove_dir_all(&root).unwrap();
@@ -533,6 +536,21 @@ mod tests {
         let output = read("boundary.txt", &root).await;
 
         assert!(output.ends_with("[File has more lines; continue reading with offset=1001]"));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_max_limit_read_is_kept_in_full() {
+        // A read at the max limit may return `MAX_READ_LIMIT` lines;
+        // the output's cap is raised to match, so no middle lines are
+        // dropped.
+        let contents = "a\n".repeat(MAX_READ_LIMIT as usize);
+
+        let root = project("max-limit", &[("max.txt", &contents)]);
+        let output = read_at("max.txt", &root, None, Some(MAX_READ_LIMIT)).await;
+
+        assert_eq!(output, contents.trim_end_matches('\n'));
 
         std::fs::remove_dir_all(&root).unwrap();
     }
