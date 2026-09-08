@@ -84,14 +84,14 @@ impl Output {
         let n = n.min(self.cap);
 
         // The most recent lines are the suffixes of the two buffers,
-        // the tail's first and then the head's.
+        // in reading order: the head's last, and then the tail's.
         let from_tail = self.tail.len().min(n);
         let from_head = (n - from_tail).min(self.head.len());
 
-        self.tail
+        self.head
             .iter()
-            .skip(self.tail.len() - from_tail)
-            .chain(self.head[self.head.len() - from_head..].iter())
+            .skip(self.head.len() - from_head)
+            .chain(self.tail.iter().skip(self.tail.len() - from_tail))
             .map(String::as_str)
     }
 
@@ -257,6 +257,29 @@ mod tests {
             output.to_string(),
             "line 0\nline 1\nline 2\n[... 2 lines elided]\nline 5\nline 6\nline 7"
         );
+    }
+
+    #[test]
+    fn a_tail_spanning_both_buffers_is_in_reading_order() {
+        // The head is full and the most recent lines span both
+        // buffers: `tail` must keep reading order, the head's last
+        // lines before the tail's.
+        let mut output = Output::with_cap(5);
+        for line in 0..8 {
+            output.push(format!("line {line}"));
+        }
+
+        // head = [0..=4], tail = [5..=7]
+        assert_eq!(
+            output.tail(4).collect::<Vec<_>>(),
+            ["line 4", "line 5", "line 6", "line 7"]
+        );
+        assert_eq!(
+            output.tail(5).collect::<Vec<_>>(),
+            ["line 3", "line 4", "line 5", "line 6", "line 7"]
+        );
+        // A request fully inside the tail is unaffected.
+        assert_eq!(output.tail(2).collect::<Vec<_>>(), ["line 6", "line 7"]);
     }
 
     #[test]

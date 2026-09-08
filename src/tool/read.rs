@@ -541,6 +541,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_line_limited_read_keeps_its_tail_in_reading_order() {
+        // The read's cap equals its limit, so a limited read fills the
+        // head exactly and the continuation notice lands in the tail;
+        // a window spanning both buffers, as the chat log renders,
+        // must stay in reading order.
+        let contents: String = (1..=10).map(|line| format!("line {line}\n")).collect();
+
+        let root = project("tail-order", &[("window.txt", &contents)]);
+        let read = Read {
+            path: "window.txt".to_owned(),
+            offset: None,
+            limit: Some(5),
+        };
+
+        let output = read.run(&root).await.unwrap();
+
+        // head = lines 1..=5 (full), tail = the continuation notice;
+        // the chat log's window, `head(2)` followed by `tail(3)`, must
+        // stay in reading order, the notice after the content.
+        let mut window: Vec<&str> = output.head(2).collect();
+        window.extend(output.tail(3));
+
+        assert_eq!(
+            window,
+            [
+                "line 1",
+                "line 2",
+                "line 4",
+                "line 5",
+                "[File has more lines; continue reading with offset=6]"
+            ]
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
     async fn a_max_limit_read_is_kept_in_full() {
         // A read at the max limit may return `MAX_READ_LIMIT` lines;
         // the output's cap is raised to match, so no middle lines are
