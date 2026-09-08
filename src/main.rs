@@ -95,7 +95,7 @@ impl Item {
         match self {
             Item::Assistant(reply) => {
                 let reasoning = if !reply.reasoning.is_empty() {
-                    const MAX_HEIGHT: f32 = SMALL as f32 * 1.5 * 8.0; // 5 lines
+                    const MAX_HEIGHT: f32 = SMALL as f32 * 1.5 * 15.0; // 15 lines
 
                     let is_done = !reply.content.is_empty() || !reply.tool_calls.is_empty();
 
