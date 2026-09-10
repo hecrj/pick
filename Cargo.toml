@@ -37,7 +37,7 @@ iced.git = "https://github.com/iced-rs/iced.git"
 iced.rev = "423a6c795f24846b8454a918710799ab5bb4d555"
 
 reason.git = "https://github.com/hecrj/reason.git"
-reason.rev = "c9e272270820ee75ba1e817d479a88ee9f1550b0"
+reason.rev = "9d3a1f54afb345f9bdc6fc3b5e016b88bda62b71"
 
 # iced.path = "../iced"
 # reason.path = "../reason"
