@@ -98,38 +98,57 @@ impl Item {
                     const MAX_HEIGHT: f32 = SMALL as f32 * 1.5 * 15.0; // 15 lines
 
                     let is_done = !reply.content.is_empty() || !reply.tool_calls.is_empty();
+                    let header = container(
+                        match reply.timings {
+                            Some(timings) => {
+                                if is_done {
+                                    text!("Thought for {}", duration(timings.reasoning))
+                                } else {
+                                    text!("Thinking... ({})", duration(timings.reasoning))
+                                }
+                            }
+                            None => text(if is_done { "Thought" } else { "Thinking..." }),
+                        }
+                        .size(SMALL)
+                        .font(Font {
+                            weight: font::Weight::Bold,
+                            ..Font::MONOSPACE
+                        }),
+                    )
+                    .width(Fill)
+                    .padding(padding::bottom(10))
+                    .style(|theme: &Theme| {
+                        use iced::Color;
+                        use iced::gradient;
+
+                        let palette = theme.palette();
+
+                        container::Style {
+                            background: Some(
+                                gradient::Linear::new(0)
+                                    .add_stop(0.0, Color::TRANSPARENT)
+                                    .add_stop(0.4, palette.background.weakest.color)
+                                    .into(),
+                            ),
+                            ..container::Style::default()
+                        }
+                    });
 
                     Some(
-                        container(
-                            column![
-                                match reply.timings {
-                                    Some(timings) => {
-                                        if is_done {
-                                            text!("Thought for {}", duration(timings.reasoning))
-                                        } else {
-                                            text!("Thinking... ({})", duration(timings.reasoning))
-                                        }
-                                    }
-                                    None => {
-                                        text(if is_done { "Thought" } else { "Thinking..." })
-                                    }
-                                }
-                                .size(SMALL)
-                                .font(Font {
-                                    weight: font::Weight::Bold,
-                                    ..Font::MONOSPACE
-                                }),
-                                scrollable(
+                        container(stack![
+                            scrollable(
+                                container(
                                     markdown::view(reply.reasoning.items(), Font::MONOSPACE, SMALL)
-                                        .map(Message::LinkClicked),
+                                        .map(Message::LinkClicked)
                                 )
-                                .width(Fill)
-                                .height(Fit.max(MAX_HEIGHT))
-                                .spacing(10)
-                                .anchor_bottom()
-                            ]
-                            .spacing(10),
-                        )
+                                .padding(padding::top(SMALL as f32 * 1.375 + 10.0)),
+                            )
+                            .width(Fill)
+                            .height(Fit.max(MAX_HEIGHT))
+                            .spacing(10)
+                            .anchor_bottom(),
+                            header,
+                        ])
                         .style(|theme| container::Style {
                             text_color: Some(theme.palette().secondary.strong.color),
                             background: Some(theme.palette().background.weakest.color.into()),
@@ -972,7 +991,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                     column(self.messages.iter().map(Item::view))
                         .spacing(20)
                         .width(Fit.max(MAX_WIDTH))
-                        .padding(padding::bottom(self.input_height + 10.0)),
+                        .padding(padding::bottom(self.input_height + 20.0)),
                 ))
                 .on_resize(|size| {
                     (size.width != self.content_width).then_some(Message::ContentResized(size))
@@ -987,7 +1006,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                 (self.snap_to_bottom != snap_to_bottom)
                     .then_some(Message::SnapToBottom(snap_to_bottom))
             })
-            .spacing(10)
+            .spacing(20)
             .into()
         };
 
