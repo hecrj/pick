@@ -5,6 +5,7 @@ mod item;
 mod locale;
 mod markdown;
 mod path;
+mod sandbox;
 mod tool;
 mod widget;
 
@@ -32,10 +33,34 @@ use reason::model;
 use std::collections::{BTreeMap, HashMap};
 use std::env;
 
+/// The flag that runs the app without the bubblewrap sandbox.
+const LIVE: &str = "--we-doin-it-live";
+
 fn main() -> Result<(), iced::Error> {
     tracing_subscriber::fmt::init();
 
-    let prompt = env::args().nth(1);
+    let args: Vec<_> = env::args().collect();
+    let live = args.iter().any(|arg| arg.as_str() == LIVE);
+    let prompt = args
+        .iter()
+        .skip(1)
+        .find(|arg| arg.as_str() != LIVE)
+        .cloned();
+
+    // Re-execute under a bubblewrap sandbox, panicking when that is
+    // not possible; `--we-doin-it-live` skips the sandbox.
+    let project = env::current_dir().unwrap_or_default();
+
+    if live {
+        log::warn!("running unsandboxed: --we-doin-it-live was passed");
+    } else {
+        match sandbox::enter(&project) {
+            sandbox::Status::Sandboxed => log::info!("running sandboxed"),
+            sandbox::Status::Bare(why) => {
+                panic!("sandboxing failed: {why}; pass --we-doin-it-live to run unsandboxed")
+            }
+        }
+    }
 
     iced::application(
         move || Pick::new(prompt.as_deref()),
