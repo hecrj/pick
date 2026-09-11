@@ -67,6 +67,7 @@ const BINARY: &str = "bwrap";
 /// projects directory are the only writable places.
 ///
 /// See the module documentation for the policy.
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
 pub fn enter(project: &Path) -> Status {
     if env::var_os(MARKER).is_some() {
         return Status::Sandboxed;
@@ -103,8 +104,10 @@ pub enum Reason {
     /// namespaces being disabled.
     Probe(String),
     /// The project directory could not be resolved.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Project,
     /// The re-execution failed for some other reason.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Exec(String),
 }
 
