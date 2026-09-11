@@ -1,23 +1,29 @@
 mod file;
+mod font;
 mod highlight;
+mod item;
+mod locale;
 mod markdown;
+mod path;
 mod tool;
+mod widget;
 
+use crate::font::Font;
+use crate::item::Item;
 use crate::markdown::Markdown;
+use crate::path::PathBuf;
 use crate::tool::Tool;
 
-use iced::border;
-use iced::font;
 use iced::keyboard;
 use iced::padding;
 use iced::task;
 use iced::time;
 use iced::widget::operation;
 use iced::widget::{
-    bottom, center, center_x, column, container, progress_bar, right, row, scrollable, sensor,
-    space, stack, text, text_editor,
+    bottom, center, center_x, column, container, row, scrollable, sensor, space, stack, text,
+    text_editor,
 };
-use iced::{Center, Element, Fill, Fit, Font, Pixels, Size, Subscription, Task, Theme, never};
+use iced::{Center, Element, Fill, Fit, Size, Subscription, Task, Theme};
 
 use function::Binary;
 use reason::Reason;
@@ -25,7 +31,6 @@ use reason::model;
 
 use std::collections::{BTreeMap, HashMap};
 use std::env;
-use std::path::{Path, PathBuf};
 
 fn main() -> Result<(), iced::Error> {
     tracing_subscriber::fmt::init();
@@ -67,317 +72,6 @@ enum Work {
     Tool(reason::tool::Id),
 }
 
-enum Item {
-    User(Markdown),
-    Assistant(Reply),
-    Tool(ToolRun),
-    Compaction(Compaction),
-}
-
-impl Item {
-    fn to_message(&self) -> Option<reason::Message> {
-        Some(match self {
-            Item::User(markdown) => reason::Message::User(markdown.raw().to_owned()),
-            Item::Assistant(reply) => reason::Message::Assistant(reason::Reply {
-                reasoning: reply.reasoning.raw().to_owned(),
-                content: reply.content.raw().to_owned(),
-                tool_calls: reply.tool_calls.clone(),
-            }),
-            Item::Tool(tool) => reason::Message::Tool(reason::tool::Response {
-                id: tool.call.id.clone(),
-                content: tool.status.content().unwrap_or_default(),
-            }),
-            Item::Compaction { .. } => None?,
-        })
-    }
-
-    fn view(&self) -> Element<'_, Message> {
-        match self {
-            Item::Assistant(reply) => {
-                let reasoning = if !reply.reasoning.is_empty() {
-                    const MAX_HEIGHT: f32 = SMALL as f32 * 1.5 * 15.0; // 15 lines
-
-                    let is_done = !reply.content.is_empty() || !reply.tool_calls.is_empty();
-                    let header = container(
-                        match reply.timings {
-                            Some(timings) => {
-                                if is_done {
-                                    text!("Thought for {}", duration(timings.reasoning))
-                                } else {
-                                    text!("Thinking... ({})", duration(timings.reasoning))
-                                }
-                            }
-                            None => text(if is_done { "Thought" } else { "Thinking..." }),
-                        }
-                        .size(SMALL)
-                        .font(Font {
-                            weight: font::Weight::Bold,
-                            ..Font::MONOSPACE
-                        }),
-                    )
-                    .width(Fill)
-                    .padding(padding::bottom(10))
-                    .style(|theme: &Theme| {
-                        use iced::Color;
-                        use iced::gradient;
-
-                        let palette = theme.palette();
-
-                        container::Style {
-                            background: Some(
-                                gradient::Linear::new(0)
-                                    .add_stop(0.0, Color::TRANSPARENT)
-                                    .add_stop(0.4, palette.background.weakest.color)
-                                    .into(),
-                            ),
-                            ..container::Style::default()
-                        }
-                    });
-
-                    Some(
-                        container(stack![
-                            scrollable(
-                                container(
-                                    markdown::view(reply.reasoning.items(), Font::MONOSPACE, SMALL)
-                                        .map(Message::LinkClicked)
-                                )
-                                .padding(padding::top(SMALL as f32 * 1.375 + 10.0)),
-                            )
-                            .width(Fill)
-                            .height(Fit.max(MAX_HEIGHT))
-                            .spacing(10)
-                            .anchor_bottom(),
-                            header,
-                        ])
-                        .style(|theme| container::Style {
-                            text_color: Some(theme.palette().secondary.strong.color),
-                            background: Some(theme.palette().background.weakest.color.into()),
-                            border: border::rounded(5),
-                            ..container::transparent(theme)
-                        })
-                        .padding(10),
-                    )
-                } else {
-                    None
-                };
-
-                column![
-                    prompt_progress(reply.prompt),
-                    reasoning,
-                    (!reply.content.is_empty()).then(|| markdown::view(
-                        reply.content.items(),
-                        Font::DEFAULT,
-                        NORMAL
-                    )
-                    .map(Message::LinkClicked)),
-                ]
-                .spacing(10)
-                .into()
-            }
-            Item::User(message) => right(
-                container(
-                    markdown::view(message.items(), Font::DEFAULT, NORMAL)
-                        .map(Message::LinkClicked),
-                )
-                .padding(10)
-                .style(container::rounded_box),
-            )
-            .into(),
-            Item::Tool(tool) => {
-                let header = {
-                    let label = container(text(&tool.call.name).size(SMALL))
-                        .padding([2, 5])
-                        .style(container::dark);
-
-                    let title = tool
-                        .state
-                        .as_ref()
-                        .ok()
-                        .and_then(|state| Some(text(state.title()?).size(SMALL)));
-
-                    row![label, title].spacing(10).align_y(Center)
-                };
-
-                let arguments = match &tool.state {
-                    Ok(state) => state.view().map(|state| state.map(never)),
-                    Err(error) => Some(text!("{error}").size(SMALL).style(text::danger).into()),
-                };
-
-                let output: Option<Element<'_, _>> = match &tool.status {
-                    Status::Running { logs } => Some(
-                        scrollable(
-                            column(logs.iter().map(|line| {
-                                text(&line[..line.floor_char_boundary(200)])
-                                    .wrapping(text::Wrapping::None)
-                                    .ellipsis(text::Ellipsis::End)
-                                    .size(SMALL)
-                                    .line_height(Pixels(TOOL_LOG_LINE_HEIGHT))
-                                    .into()
-                            }))
-                            .spacing(5),
-                        )
-                        .id(tool.call.id.as_str().to_owned())
-                        .width(Fill)
-                        .height(Fit.max(MAX_TOOL_LOG_HEIGHT))
-                        .on_scroll(|viewport| {
-                            let snap_to_bottom = snap_to_bottom(viewport);
-
-                            (tool.snap_to_bottom != snap_to_bottom).then_some(
-                                Message::ToolScrolled(tool.call.id.clone(), snap_to_bottom),
-                            )
-                        })
-                        .spacing(10)
-                        .into(),
-                    ),
-                    Status::Success { output } if output.lines() > 0 => {
-                        /// The first and last lines a long finished output
-                        /// keeps; the middle is elided
-                        const HEAD: usize = 2;
-                        const TAIL: usize = 3;
-
-                        fn line<'a>(line: &'a str) -> Element<'a, Message> {
-                            text(&line[..line.floor_char_boundary(200)])
-                                .wrapping(text::Wrapping::None)
-                                .ellipsis(text::Ellipsis::End)
-                                .size(SMALL)
-                                .into()
-                        }
-
-                        let total = output.lines();
-
-                        Some(
-                            if total > HEAD + TAIL {
-                                let elided = total - HEAD - TAIL;
-
-                                let marker = match elided {
-                                    1 => "... 1 line elided".to_owned(),
-                                    elided => {
-                                        format!("... {} lines elided", thousands(elided as u64))
-                                    }
-                                };
-
-                                column(
-                                    output
-                                        .head(HEAD)
-                                        .map(line)
-                                        .chain(std::iter::once(
-                                            text(marker).size(SMALL).style(text::secondary).into(),
-                                        ))
-                                        .chain(output.tail(TAIL).map(line)),
-                                )
-                                .spacing(5)
-                            } else {
-                                column(output.all().map(line))
-                            }
-                            .spacing(5)
-                            .into(),
-                        )
-                    }
-                    Status::Success { .. }
-                    | Status::Error { .. }
-                    | Status::Invalid
-                    | Status::Aborted => tool.status.content().map(|content| {
-                        let trimmed = content.trim();
-
-                        text(if trimmed.is_empty() {
-                            "[No output]".to_owned()
-                        } else {
-                            trimmed.to_owned()
-                        })
-                        .size(SMALL)
-                        .into()
-                    }),
-                };
-
-                let output = output.map(|output| {
-                    container(output)
-                        .width(Fill)
-                        .padding(10)
-                        .style(|theme: &Theme| {
-                            let palette = theme.seed();
-
-                            let color = match tool.status {
-                                Status::Running { .. } => palette.warning,
-                                Status::Success { .. } => palette.success.scale_alpha(0.5),
-                                Status::Invalid | Status::Aborted | Status::Error { .. } => {
-                                    palette.danger
-                                }
-                            };
-
-                            let mut style = container::dark(theme);
-                            style.border = style.border.color(color).width(1);
-                            style
-                        })
-                });
-
-                container(column![header, arguments, output].spacing(10))
-                    .width(Fill)
-                    .padding(10)
-                    .style(container::bordered_box)
-                    .into()
-            }
-            Item::Compaction(compaction) => {
-                let notice = center_x(text(if compaction.is_finished {
-                    format!("Compacted into {} tokens", compaction.tokens)
-                } else if compaction.reply.content.is_empty() {
-                    format!("Analyzing... {} tokens", compaction.reasoning_tokens)
-                } else {
-                    format!("Compacting... {} tokens", compaction.tokens)
-                }));
-
-                column![prompt_progress(compaction.reply.prompt), notice]
-                    .spacing(10)
-                    .into()
-            }
-        }
-    }
-}
-
-#[derive(Debug, Default)]
-struct Reply {
-    prompt: reason::Progress,
-    reasoning: Markdown,
-    content: Markdown,
-    tool_calls: Vec<reason::tool::Call>,
-    timings: Option<reason::Timings>,
-}
-
-struct ToolRun {
-    call: reason::tool::Call,
-    state: Result<Box<dyn tool::Call>, reason::Error>,
-    status: Status,
-    snap_to_bottom: bool,
-}
-
-#[derive(Debug)]
-enum Status {
-    Running { logs: Vec<String> },
-    Success { output: tool::Output },
-    Error { output: String },
-    Invalid,
-    Aborted,
-}
-
-impl Status {
-    fn content(&self) -> Option<String> {
-        match self {
-            Status::Running { .. } => None, // Never send intermediate progress
-            Status::Success { output } => Some(output.to_string()),
-            Status::Error { output } => Some(output.clone()),
-            Status::Invalid => Some("[invalid tool call]".to_owned()),
-            Status::Aborted => Some("[execution aborted]".to_owned()),
-        }
-    }
-}
-
-struct Compaction {
-    reply: Reply,
-    tokens: u64,
-    reasoning_tokens: u64,
-    to: usize,
-    is_finished: bool,
-}
-
 #[derive(Debug, Clone)]
 enum Connection {
     Disconnected,
@@ -399,10 +93,9 @@ enum Message {
     ReplyReceived(Result<reason::Reply, reason::Error>),
     CompactionProgressed(reason::Event),
     CompactionReceived(Result<reason::Reply, reason::Error>),
-    LinkClicked(markdown::Uri),
     ToolProgressed(reason::tool::Id, String),
     ToolFinished(reason::tool::Id, Result<tool::Output, reason::Error>),
-    ToolScrolled(reason::tool::Id, bool),
+    Item(usize, item::Message),
     Abort,
 }
 
@@ -659,11 +352,6 @@ impl Pick {
 
                 self.work()
             }
-            Message::LinkClicked(uri) => {
-                log::debug!("{uri:?}");
-
-                Task::none()
-            }
             Message::ToolProgressed(id, line) => {
                 let Some(tool) = self.messages.iter_mut().rev().find_map(|message| {
                     if let Item::Tool(tool) = message
@@ -677,7 +365,7 @@ impl Pick {
                     return Task::none();
                 };
 
-                let Status::Running { logs } = &mut tool.status else {
+                let item::Status::Running { logs } = &mut tool.status else {
                     return Task::none();
                 };
 
@@ -688,23 +376,6 @@ impl Pick {
                 } else {
                     Task::none()
                 }
-            }
-            Message::ToolScrolled(id, snap_to_bottom) => {
-                let Some(tool) = self.messages.iter_mut().rev().find_map(|message| {
-                    if let Item::Tool(tool) = message
-                        && tool.call.id == id
-                    {
-                        Some(tool)
-                    } else {
-                        None
-                    }
-                }) else {
-                    return Task::none();
-                };
-
-                tool.snap_to_bottom = snap_to_bottom;
-
-                Task::none()
             }
             Message::ToolFinished(id, result) => {
                 let Some(tool) = self.messages.iter_mut().rev().find_map(|message| {
@@ -721,13 +392,13 @@ impl Pick {
 
                 let _ = self.tasks.remove(&Work::Tool(id));
 
-                if !matches!(tool.status, Status::Running { .. }) {
+                if !matches!(tool.status, item::Status::Running { .. }) {
                     return Task::none();
                 }
 
                 tool.status = match result {
-                    Ok(output) => Status::Success { output },
-                    Err(error) => Status::Error {
+                    Ok(output) => item::Status::Success { output },
+                    Err(error) => item::Status::Error {
                         output: error.to_string(),
                     },
                 };
@@ -742,6 +413,13 @@ impl Pick {
                 self.abort();
 
                 Task::none()
+            }
+            Message::Item(i, message) => {
+                let Some(item) = self.messages.get_mut(i) else {
+                    return Task::none();
+                };
+
+                item.update(message).map(Message::Item.with(i))
             }
             Message::Connected(Err(error))
             | Message::ModelsListed(Err(error))
@@ -762,16 +440,16 @@ impl Pick {
 
         for message in &mut self.messages {
             if let Item::Tool(tool) = message
-                && matches!(tool.status, Status::Running { .. })
+                && matches!(tool.status, item::Status::Running { .. })
             {
-                tool.status = Status::Aborted;
+                tool.status = item::Status::Aborted;
             }
         }
 
         let index = self.messages.iter().rposition(|message| {
             matches!(
                 message,
-                Item::Compaction(Compaction {
+                Item::Compaction(item::Compaction {
                     is_finished: false,
                     ..
                 })
@@ -824,7 +502,7 @@ impl Pick {
         .abortable();
 
         self.tasks.insert(Work::Completion, handle.abort_on_drop());
-        self.messages.push(Item::Assistant(Reply::default()));
+        self.messages.push(Item::Assistant(item::Reply::default()));
 
         reply
     }
@@ -851,12 +529,12 @@ impl Pick {
                 self.tasks
                     .insert(Work::Tool(call.id.clone()), handle.abort_on_drop());
 
-                (run, Status::Running { logs: Vec::new() })
+                (run, item::Status::Running { logs: Vec::new() })
             }
-            Err(_error) => (Task::none(), Status::Invalid),
+            Err(_error) => (Task::none(), item::Status::Invalid),
         };
 
-        self.messages.push(Item::Tool(ToolRun {
+        self.messages.push(Item::Tool(item::ToolRun {
             call,
             state,
             status,
@@ -915,7 +593,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
             .iter()
             .rev()
             .position(|item| {
-                let Item::Assistant(Reply {
+                let Item::Assistant(item::Reply {
                     timings: Some(timings),
                     ..
                 }) = item
@@ -960,8 +638,8 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
         let model = model.clone();
         let tools: Vec<_> = self.tools().collect();
 
-        self.messages.push(Item::Compaction(Compaction {
-            reply: Reply::default(),
+        self.messages.push(Item::Compaction(item::Compaction {
+            reply: item::Reply::default(),
             tokens: 0,
             reasoning_tokens: 0,
             to: (self.messages.len() - context.len()) + end,
@@ -981,17 +659,27 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
     }
 
     fn view(&self) -> Element<'_, Message> {
+        const MAX_WIDTH: u32 = 770;
+
         let conversation: Element<'_, Message> = if self.messages.is_empty() {
-            sensor(center(text("Ready when you are.").size(TITLE).center()))
-                .on_resize(Message::ContentResized)
-                .into()
+            sensor(center(
+                text("Ready when you are.").size(font::TITLE).center(),
+            ))
+            .on_resize(Message::ContentResized)
+            .into()
         } else {
             scrollable(
                 sensor(center_x(
-                    column(self.messages.iter().map(Item::view))
-                        .spacing(20)
-                        .width(Fit.max(MAX_WIDTH))
-                        .padding(padding::bottom(self.input_height + 20.0)),
+                    column(
+                        self.messages
+                            .iter()
+                            .map(Item::view)
+                            .enumerate()
+                            .map(|(i, item)| item.map(Message::Item.with(i))),
+                    )
+                    .spacing(20)
+                    .width(Fit.max(MAX_WIDTH))
+                    .padding(padding::bottom(self.input_height + 20.0)),
                 ))
                 .on_resize(|size| {
                     (size.width != self.content_width).then_some(Message::ContentResized(size))
@@ -1001,7 +689,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
             .width(Fill)
             .height(Fill)
             .on_scroll(|viewport| {
-                let snap_to_bottom = snap_to_bottom(viewport);
+                let snap_to_bottom = widget::snaps(viewport);
 
                 (self.snap_to_bottom != snap_to_bottom)
                     .then_some(Message::SnapToBottom(snap_to_bottom))
@@ -1035,7 +723,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
             });
 
         let status = {
-            let project = tildify(&self.project, self.home.as_deref());
+            let project = path::tildify(&self.project, self.home.as_deref());
 
             let server = {
                 let timings = self.timings();
@@ -1048,7 +736,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                                 tokens_per_second = 1.0 / timings.prompt.token.as_secs_f64(),
                             )
                             .style(text::secondary)
-                            .size(SMALL)
+                            .size(font::SMALL)
                         }),
                         (timings.predicted.token > time::Duration::ZERO).then(|| {
                             text!(
@@ -1056,7 +744,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                                 tokens_per_second = 1.0 / timings.predicted.token.as_secs_f64(),
                             )
                             .style(text::success)
-                            .size(SMALL)
+                            .size(font::SMALL)
                         })
                     ]
                     .spacing(10)
@@ -1067,7 +755,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                 } else {
                     text("No models found!")
                 }
-                .size(SMALL)
+                .size(font::SMALL)
                 .width(Fit.max(200))
                 .wrapping(text::Wrapping::None)
                 .ellipsis(text::Ellipsis::End)
@@ -1083,13 +771,13 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                     }
                 });
 
-                let context = context_led(self.context_size(), timings);
+                let context = widget::context_led(self.context_size(), timings);
 
                 row![info, models, context].spacing(10).align_y(Center)
             };
 
             row![
-                text(project.display().to_string()).size(SMALL),
+                text(project.display().to_string()).size(font::SMALL),
                 space::horizontal(),
                 server,
             ]
@@ -1135,10 +823,10 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
         &self.messages[start..]
     }
 
-    fn last_compaction(&self) -> Option<&Compaction> {
+    fn last_compaction(&self) -> Option<&item::Compaction> {
         self.messages.iter().rev().find_map(|item| {
             let Item::Compaction(
-                compaction @ Compaction {
+                compaction @ item::Compaction {
                     is_finished: true, ..
                 },
             ) = item
@@ -1188,218 +876,12 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
 
     fn timings(&self) -> Option<reason::Timings> {
         self.context().iter().rev().find_map(|item| {
-            if let Item::Assistant(reply) | Item::Compaction(Compaction { reply, .. }) = item {
+            if let Item::Assistant(reply) | Item::Compaction(item::Compaction { reply, .. }) = item
+            {
                 reply.timings
             } else {
                 None
             }
         })
     }
-}
-
-const TITLE: u32 = 20;
-const NORMAL: u32 = 16;
-const SMALL: u32 = 14;
-const MAX_WIDTH: u32 = 770;
-const TOOL_LOG_LINE_HEIGHT: f32 = 18.0;
-const MAX_TOOL_LOG_HEIGHT: f32 = TOOL_LOG_LINE_HEIGHT * 10.0 + 5.0 * 9.0; // 10 lines: 10 × 18px + 9 × 5px spacing
-const SNAP_TO_BOTTOM: f32 = 20.0;
-
-fn snap_to_bottom(viewport: scrollable::Viewport) -> bool {
-    let offset = viewport.absolute_offset();
-    let bounds = viewport.bounds();
-    let content_bounds = viewport.content_bounds();
-
-    let distance_to_bottom = (content_bounds.height - bounds.height - offset.y).max(0.0);
-
-    distance_to_bottom <= SNAP_TO_BOTTOM
-}
-
-fn tildify(path: &Path, home: Option<&Path>) -> PathBuf {
-    let Some(home) = home else {
-        return path.to_path_buf();
-    };
-
-    match path.strip_prefix(home) {
-        Ok(rest) if rest.as_os_str().is_empty() => PathBuf::from("~"),
-        Ok(rest) => Path::new("~").join(rest),
-        Err(_) => path.to_path_buf(),
-    }
-}
-
-fn context_led<'a>(
-    context_size: Option<u64>,
-    timings: Option<reason::Timings>,
-) -> Element<'a, Message> {
-    use iced::mouse;
-    use iced::widget::{canvas, tooltip};
-    use iced::{Radians, Rectangle, Renderer};
-
-    use std::cell::RefCell;
-    use std::f32::consts::{FRAC_PI_2, PI};
-
-    const SIZE: f32 = 14.0;
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-    struct Led {
-        context_size: Option<u64>,
-        timings: Option<reason::Timings>,
-    }
-
-    #[derive(Default)]
-    struct State {
-        last: RefCell<Led>,
-        cache: canvas::Cache,
-    }
-
-    impl canvas::Program<Message> for Led {
-        type State = State;
-
-        fn draw(
-            &self,
-            state: &Self::State,
-            renderer: &Renderer,
-            theme: &Theme,
-            bounds: Rectangle,
-            _cursor: mouse::Cursor,
-        ) -> Vec<canvas::Geometry> {
-            const STROKE_WIDTH: f32 = 2.0;
-
-            if *state.last.borrow() != *self {
-                *state.last.borrow_mut() = *self;
-                state.cache.clear();
-            }
-
-            let geometry = state.cache.draw(renderer, bounds.size(), |frame| {
-                let palette = theme.palette();
-                let radius = (frame.width() - STROKE_WIDTH) / 2.0;
-                let circle = canvas::Path::circle(frame.center(), radius);
-
-                frame.stroke(
-                    &circle,
-                    canvas::Stroke {
-                        style: canvas::Style::Solid(palette.background.strong.color),
-                        width: STROKE_WIDTH,
-                        ..canvas::Stroke::default()
-                    },
-                );
-
-                if let Some(timings) = self.timings
-                    && let Some(context_size) = self.context_size
-                {
-                    let usage = timings.total_tokens() as f32 / context_size as f32;
-
-                    let arc = {
-                        let mut builder = canvas::path::Builder::new();
-
-                        let start = -FRAC_PI_2;
-
-                        builder.arc(canvas::path::Arc {
-                            center: frame.center(),
-                            radius,
-                            start_angle: Radians(start),
-                            end_angle: Radians(start + 2.0 * PI * usage),
-                        });
-
-                        builder.build()
-                    };
-
-                    frame.stroke(
-                        &arc,
-                        canvas::Stroke {
-                            style: canvas::Style::Solid(match usage {
-                                0.0..0.8 => palette.primary.base.color,
-                                0.8..0.9 => palette.warning.base.color,
-                                _ => palette.danger.base.color,
-                            }),
-                            width: STROKE_WIDTH,
-                            line_cap: canvas::LineCap::Square,
-                            ..canvas::Stroke::default()
-                        },
-                    );
-                }
-            });
-
-            vec![geometry]
-        }
-    }
-
-    let led = canvas(Led {
-        timings,
-        context_size,
-    })
-    .width(SIZE)
-    .height(SIZE);
-
-    match (context_size, timings) {
-        (Some(context_size), Some(timings)) => {
-            let tokens = timings.total_tokens();
-            let percent = tokens as f32 / context_size as f32 * 100.0;
-
-            tooltip(
-                led,
-                text!(
-                    "{} / {} ({percent:.1}%)",
-                    thousands(tokens),
-                    thousands(context_size)
-                )
-                .size(SMALL),
-                tooltip::Position::Top,
-            )
-            .style(container::rounded_box)
-            .into()
-        }
-        _ => led.into(),
-    }
-}
-
-fn thousands(value: u64) -> String {
-    let digits = value.to_string();
-    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
-
-    for (index, digit) in digits.char_indices() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            formatted.push(',');
-        }
-
-        formatted.push(digit);
-    }
-
-    formatted
-}
-
-fn duration(duration: time::Duration) -> String {
-    let seconds = duration.as_secs_f64();
-
-    if seconds < 1.0 {
-        format!("{}ms", duration.as_millis())
-    } else if seconds < 60.0 {
-        format!("{seconds:.1}s")
-    } else {
-        let total = seconds.round() as u64;
-        let (hours, minutes) = (total / 3600, (total % 3600) / 60);
-        let seconds = total % 60;
-
-        if hours > 0 {
-            format!("{hours}h {minutes}m {seconds}s")
-        } else {
-            format!("{minutes}m {seconds}s")
-        }
-    }
-}
-
-fn prompt_progress<'a>(progress: reason::Progress) -> Option<Element<'a, Message>> {
-    if progress.total == progress.processed {
-        return None;
-    }
-
-    Some(
-        center_x(
-            progress_bar(0.0..=1.0, progress.processed as f32 / progress.total as f32)
-                .girth(10)
-                .length(100)
-                .style(progress_bar::secondary),
-        )
-        .into(),
-    )
 }
