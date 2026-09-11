@@ -555,7 +555,7 @@ impl Pick {
         const CONTINUITY_CONTEXT: f32 = 0.2;
 
         const COMPACTION_PROMPT: &str = r#"The earlier part of this conversation is about to be removed to free up context.
-After your next message, only your summary of it will remain, embedded in your system prompt for the rest of the session.
+Your next message will be the only one to remain, at the start of the conversation for the rest of the session.
 
 Write a concise state handoff so the work can continue seamlessly without the original messages. Cover:
 - The user's goal, and any explicit constraints or preferences
@@ -564,7 +564,7 @@ Write a concise state handoff so the work can continue seamlessly without the or
 - Errors encountered and how they were resolved or to be avoided
 - Open questions and the immediate next steps
 Omit chit-chat, raw tool output, and failed experiments (keep only the lesson).
-If your system prompt already contains a previous summary, merge it into this one; the result must be self-contained.
+If the conversation above already contains a previous summary, merge it into this one; the result must be self-contained.
 Reply with only the summary, under 500 words. You cannot use any tools."#;
 
         let Connection::Connected(reason) = &self.connection else {
@@ -838,36 +838,38 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
         })
     }
 
-    fn system_prompt(&self) -> String {
-        const PROMPT: &str = "You are an expert coding assistant. \
+    /// The system prompt, the compaction summary — if any — and the
+    /// most recent user message before the compaction cutoff, the
+    /// opener of the turn the boundary falls in, so the model retains
+    /// the verbatim request that the summary only paraphrases.
+    fn opener(&self) -> impl Iterator<Item = reason::Message> {
+        const SYSTEM_PROMPT: &str = "You are an expert coding assistant. \
             The user wants your help to develop a project in the current directory.";
 
-        if let Some(compaction) = self.last_compaction() {
-            format!("{PROMPT}\n\n{}", compaction.reply.content.raw())
-        } else {
-            PROMPT.to_owned()
-        }
-    }
-
-    /// The system prompt, plus the most recent user message before the
-    /// compaction cutoff — the opener of the turn the boundary falls in —
-    /// so the model retains the verbatim request that the summary only
-    /// paraphrases.
-    fn opener(&self) -> impl Iterator<Item = reason::Message> {
         let start = self.messages.len() - self.context().len();
 
-        std::iter::once(reason::Message::System(self.system_prompt())).chain(
-            if let Some(Item::Assistant(_) | Item::Compaction(_)) = self.messages.get(start)
-                && let Some(Item::User(markdown)) = self.messages[..start]
-                    .iter()
-                    .rev()
-                    .find(|item| matches!(item, Item::User(_)))
-            {
-                Some(reason::Message::User(markdown.raw().to_owned()))
-            } else {
-                None
-            },
-        )
+        let last_user_turn = if let Some(Item::Assistant(_) | Item::Compaction(_)) =
+            self.messages.get(start)
+            && let Some(Item::User(markdown)) = self.messages[..start]
+                .iter()
+                .rev()
+                .find(|item| matches!(item, Item::User(_)))
+        {
+            Some(reason::Message::User(markdown.raw().to_owned()))
+        } else {
+            None
+        };
+
+        let last_compaction = self.last_compaction().map(|compaction| {
+            reason::Message::Assistant(reason::Reply {
+                content: compaction.reply.content.raw().to_owned(),
+                ..reason::Reply::default()
+            })
+        });
+
+        std::iter::once(reason::Message::System(SYSTEM_PROMPT.to_owned()))
+            .chain(last_compaction)
+            .chain(last_user_turn)
     }
 
     fn tools(&self) -> impl Iterator<Item = reason::Tool> {
