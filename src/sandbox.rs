@@ -8,9 +8,14 @@
 //! - the user, pid, ipc, and uts namespaces are unshared, so the
 //!   sandboxed process has no host identity and cannot see or signal
 //!   host processes;
-//! - the root filesystem is bound read-only, with the project and
-//!   the user's projects directory as the writable places besides
-//!   the ssh-agent socket, and `/tmp` a private tmpfs;
+//! - the root filesystem is bound read-only, with the project, the
+//!   user's projects directory, and the scratchpad as the writable
+//!   places besides the ssh-agent socket; the scratchpad is a
+//!   dedicated leaf under the host's temp directory — `TMPDIR` if
+//!   set, else `/tmp` — mounted at `/tmp`, so the system reaps it:
+//!   tmpfiles ages out idle leaves where it manages the directory,
+//!   and a reboot clears them on a tmpfs, instead of pick having to
+//!   clean it up;
 //! - the home directory is replaced by a tmpfs, hiding credentials
 //!   and configuration, with only the Rust toolchain remounted;
 //! - the user's projects directory is bound read-write, so the
@@ -64,7 +69,8 @@ const BINARY: &str = "bwrap";
 
 /// Re-executes the process under a bubblewrap sandbox in which
 /// `project`, the directory the tools operate in, and the user's
-/// projects directory are the only writable places.
+/// projects directory are the only writable places, besides the
+/// scratchpad mounted at `/tmp`.
 ///
 /// See the module documentation for the policy.
 #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
@@ -106,6 +112,10 @@ pub enum Reason {
     /// The project directory could not be resolved.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Project,
+    /// The scratchpad under the host's temp directory could not
+    /// be prepared.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Scratch(String),
     /// The re-execution failed for some other reason.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Exec(String),
@@ -124,6 +134,9 @@ impl fmt::Display for Reason {
                 }
             }
             Self::Project => f.write_str("the project directory could not be resolved"),
+            Self::Scratch(detail) => {
+                write!(f, "the scratchpad could not be prepared: {detail}")
+            }
             Self::Exec(detail) => write!(f, "the sandbox re-execution failed: {detail}"),
         }
     }
@@ -143,6 +156,13 @@ fn enter_linux(project: &Path) -> Status {
 
     if let Err(detail) = probe(&bwrap) {
         return Status::Bare(Reason::Probe(detail));
+    }
+
+    // The scratchpad the sandbox's `/tmp` is backed by must exist
+    // on the host before the bind, and be safe to bind.
+    let scratch = scratch_leaf(&project);
+    if let Err(detail) = prepare_scratch(&scratch) {
+        return Status::Bare(Reason::Scratch(detail));
     }
 
     let exe = match env::current_exe() {
@@ -201,9 +221,93 @@ fn find_on_path(name: &str, pathvar: Option<&std::ffi::OsStr>) -> Option<PathBuf
         .find(|candidate| candidate.is_file())
 }
 
+/// The scratchpad the sandbox's `/tmp` is backed by: a dedicated
+/// leaf under the host's temp directory, named after the project
+/// and a hash of its path. The caller passes the canonical path,
+/// so the name is deterministic: the same project finds the same
+/// leaf across launches — the scratch survives a kill and a
+/// relaunch — and distinct projects name distinct leaves.
+///
+/// Living under the host's temp directory means the system owns
+/// the leaf's lifetime: tmpfiles reaps leaves idle past its age
+/// limit where it manages the directory, and a reboot clears them
+/// where it is a tmpfs. Pick never has to clean it up.
+fn scratch_leaf(project: &Path) -> PathBuf {
+    let hash = format!("{:016x}", fnv1a_64(project.as_os_str().as_encoded_bytes()));
+
+    let name = match project.file_name().and_then(|name| name.to_str()) {
+        Some(name) => format!("pick-{name}-{}", &hash[..8]),
+        None => format!("pick-{}", &hash[..8]),
+    };
+
+    env::temp_dir().join(name)
+}
+
+/// FNV-1a over a byte slice, the deterministic half of the
+/// scratchpad's name. `DefaultHasher` is randomly seeded per
+/// process, so a std hasher would not name the same leaf across
+/// launches.
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    bytes.iter().fold(OFFSET_BASIS, |state, &byte| {
+        (state ^ u64::from(byte)).wrapping_mul(PRIME)
+    })
+}
+
+/// Creates the scratchpad leaf when missing and verifies it is
+/// safe to bind: a plain directory owned by the current user. The
+/// host's temp directory is world-writable, so a local user could
+/// otherwise plant a symlink or file at the leaf name and redirect
+/// or break the bind.
+#[cfg(target_os = "linux")]
+fn prepare_scratch(leaf: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Check what is at the leaf before touching it: a symlink
+    // would be followed by the bind, and a foreign file or
+    // directory would not be chmoddable.
+    if let Ok(meta) = std::fs::symlink_metadata(leaf) {
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "{} is a symlink; remove it and retry",
+                leaf.display()
+            ));
+        }
+        if !meta.file_type().is_dir() {
+            return Err(format!(
+                "{} exists and is not a directory; remove it and retry",
+                leaf.display()
+            ));
+        }
+    }
+
+    std::fs::create_dir_all(leaf).map_err(|error| error.to_string())?;
+
+    // Re-verify after the create, in case something landed in
+    // between, then drop the group and other bits so only the
+    // owner can inspect the scratch. The chmod also proves
+    // ownership: a directory someone else made would refuse it.
+    let meta = std::fs::symlink_metadata(leaf).map_err(|error| error.to_string())?;
+    if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+        return Err(format!(
+            "{} is not a plain directory; remove it and retry",
+            leaf.display()
+        ));
+    }
+
+    std::fs::set_permissions(leaf, std::fs::Permissions::from_mode(0o700)).map_err(|error| {
+        format!(
+            "{} is not owned by the current user ({error})",
+            leaf.display()
+        )
+    })
+}
+
 /// The bubblewrap arguments that sandbox a re-execution of `exe`
-/// with `project` and the user's projects directory as the only
-/// writable directories.
+/// with `project`, the user's projects directory, and the
+/// scratchpad at `/tmp` as the only writable directories.
 ///
 /// Bubblewrap applies the mounts in the order given, so the
 /// read-only root comes first and the exceptions follow.
@@ -221,7 +325,12 @@ fn bwrap_args(project: &Path, home: Option<&Path>, exe: &Path) -> Vec<OsString> 
         OsString::from("--ro-bind"),
         os(Path::new("/")),
         os(Path::new("/")),
-        OsString::from("--tmpfs"),
+        // The scratchpad, a dedicated leaf under the host's temp
+        // directory, replaces the host's `/tmp` as the sandbox's
+        // scratch space: private to this project, persistent after
+        // the sandbox dies, and reaped by the system.
+        OsString::from("--bind"),
+        os(&scratch_leaf(project)),
         os(Path::new("/tmp")),
         OsString::from("--tmpfs"),
         os(Path::new("/var/tmp")),
@@ -378,7 +487,8 @@ fn bwrap_args(project: &Path, home: Option<&Path>, exe: &Path) -> Vec<OsString> 
         args.extend([OsString::from("--bind"), os(&socket), os(&socket)]);
     }
 
-    // The project is the only writable directory of the sandbox.
+    // The project, beside the scratchpad above, is the other
+    // writable place of the sandbox.
     args.extend([OsString::from("--bind"), os(project), os(project)]);
 
     // A minimal `/dev` and a `/proc` that only knows the sandbox's
@@ -704,17 +814,144 @@ mod tests {
             .map(|window| window.to_vec())
             .collect::<Vec<_>>();
 
+        // The scratchpad leaf and the project are the only writable
+        // places; the scratchpad is a dedicated leaf under the
+        // host's temp directory, mounted at `/tmp`.
+        let scratch = scratch_leaf(&project()).to_string_lossy().into_owned();
         assert_eq!(
             writable,
-            [vec![
-                "--bind",
-                "/home/user/code/pick",
-                "/home/user/code/pick"
-            ]]
+            [
+                vec!["--bind", scratch.as_str(), "/tmp"],
+                vec!["--bind", "/home/user/code/pick", "/home/user/code/pick",],
+            ]
+        );
+    }
+
+    #[test]
+    fn the_scratch_leaf_is_deterministic_and_named_after_the_project() {
+        let leaf = scratch_leaf(&project());
+
+        // Deterministic: the same project names the same leaf...
+        assert_eq!(leaf, scratch_leaf(&project()));
+        // ...under the host's temp directory, named after the
+        // project and a hash of its path...
+        assert_eq!(leaf.parent(), Some(std::env::temp_dir().as_path()));
+        let name = leaf.file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with("pick-pick-"), "{name}");
+        assert_eq!(name.len(), "pick-pick-".len() + 8);
+        // ...and a different project names a different leaf.
+        assert_ne!(leaf, scratch_leaf(Path::new("/home/user/code/other")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_non_utf8_name_falls_back_to_the_hash() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        // The file name is not UTF-8, so the leaf is named after
+        // the hash alone; the assertion reads it back as a string.
+        let project = Path::new(OsStr::from_bytes(b"/home/user/code/pick-\xff"));
+        let leaf = scratch_leaf(project);
+
+        let name = leaf.file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with("pick-"), "{name}");
+        assert_eq!(name.len(), "pick-".len() + 8);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_scratch_leaf_name_is_pinned_for_a_known_project() {
+        // Golden vector: the leaf name is on-disk state that
+        // survives launches, so the naming scheme is frozen — a
+        // change would rename every leaf and orphan the scratch it
+        // held. Linux-gated: leaves only exist there, and the path
+        // bytes hashed differ per platform.
+        let leaf = scratch_leaf(Path::new("/home/user/code/pick"));
+
+        assert_eq!(
+            leaf.file_name().unwrap().to_str().unwrap(),
+            "pick-pick-30941fe7"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_scratch_leaf_is_created_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let leaf = std::env::temp_dir().join(format!("pick-scratch-create-{}", std::process::id()));
+
+        let result = prepare_scratch(&leaf);
+
+        assert!(result.is_ok(), "{result:?}");
+        assert!(leaf.is_dir());
+        assert_eq!(
+            std::fs::metadata(&leaf).unwrap().permissions().mode() & 0o777,
+            0o700
         );
 
-        // Scratch space is private to the sandbox.
-        assert!(args.windows(2).any(|window| window == ["--tmpfs", "/tmp"]));
+        let _ = std::fs::remove_dir_all(&leaf);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_existing_leaf_is_reused_and_tightened() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let leaf =
+            std::env::temp_dir().join(format!("pick-scratch-existing-{}", std::process::id()));
+        std::fs::create_dir_all(&leaf).unwrap();
+        std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let result = prepare_scratch(&leaf);
+
+        assert!(result.is_ok(), "{result:?}");
+        // A relaunch re-enters a leaf it created itself: it is
+        // kept, not refused, and tightened to the private mode.
+        assert_eq!(
+            std::fs::metadata(&leaf).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        let _ = std::fs::remove_dir_all(&leaf);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_planted_symlink_at_the_scratch_leaf_is_refused() {
+        use std::os::unix::fs::symlink;
+
+        let leaf =
+            std::env::temp_dir().join(format!("pick-scratch-symlink-{}", std::process::id()));
+        let target =
+            std::env::temp_dir().join(format!("pick-scratch-target-{}", std::process::id()));
+        std::fs::create_dir_all(&target).unwrap();
+        symlink(&target, &leaf).unwrap();
+
+        let result = prepare_scratch(&leaf);
+
+        assert!(result.is_err(), "{result:?}");
+        assert!(result.unwrap_err().contains("symlink"));
+        // The symlink target was left untouched.
+        assert!(target.is_dir());
+
+        let _ = std::fs::remove_file(&leaf);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_planted_file_at_the_scratch_leaf_is_refused() {
+        let leaf = std::env::temp_dir().join(format!("pick-scratch-file-{}", std::process::id()));
+        std::fs::write(&leaf, "").unwrap();
+
+        let result = prepare_scratch(&leaf);
+
+        assert!(result.is_err(), "{result:?}");
+        assert!(result.unwrap_err().contains("not a directory"));
+
+        let _ = std::fs::remove_file(&leaf);
     }
 
     #[test]
@@ -814,12 +1051,17 @@ mod tests {
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(sibling.join("note.txt"), "reference\n").unwrap();
 
+        // The scratchpad leaf must exist on the host for its bind.
+        #[cfg(target_os = "linux")]
+        prepare_scratch(&scratch_leaf(&project)).expect("scratch leaf");
+
         let mut args = bwrap_args(&project, Some(&root), &exe());
         args.truncate(args.len() - 2); // Drop the `--` and the executable.
         let probe = format!(
             "test -f {s} && echo SIBLING_READABLE; \
              touch {p}/scratch 2>/dev/null && echo PROJECT_WRITABLE; \
-             touch {sib}/scratch 2>/dev/null && echo SIBLING_WRITABLE || echo SIBLING_READONLY",
+             touch {sib}/scratch 2>/dev/null && echo SIBLING_WRITABLE || echo SIBLING_READONLY; \
+             touch /tmp/scratch-probe 2>/dev/null && echo SCRATCH_WRITABLE",
             s = sibling.join("note.txt").display(),
             p = project.display(),
             sib = sibling.display(),
@@ -848,6 +1090,7 @@ mod tests {
         assert!(stdout.contains("PROJECT_WRITABLE"), "{stdout}");
         assert!(stdout.contains("SIBLING_WRITABLE"), "{stdout}");
         assert!(!stdout.contains("SIBLING_READONLY"), "{stdout}");
+        assert!(stdout.contains("SCRATCH_WRITABLE"), "{stdout}");
     }
 
     #[test]
