@@ -55,9 +55,9 @@ fn main() -> Result<(), iced::Error> {
         log::warn!("running unsandboxed: --we-doin-it-live was passed");
     } else {
         match sandbox::enter(&project) {
-            sandbox::Status::Sandboxed => log::info!("running sandboxed"),
-            sandbox::Status::Bare(why) => {
-                panic!("sandboxing failed: {why}; pass --we-doin-it-live to run unsandboxed")
+            Ok(()) => log::info!("running sandboxed"),
+            Err(error) => {
+                panic!("sandboxing failed: {error}; pass --we-doin-it-live to run unsandboxed")
             }
         }
     }
