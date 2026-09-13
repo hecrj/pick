@@ -1,9 +1,20 @@
 [package]
 name = "pick"
-version = "0.1.0"
+version = "0.1.0-dev"
 edition = "2024"
 
+[workspace]
+members = ["core"]
+
 [dependencies]
+pick-core = { version = "0.1.0-dev", path = "./core" }
+
+function = "0.3"
+log = "0.4"
+reason = "0.2.0-dev"
+serde_json = "1"
+sipper = "0.2"
+
 iced.version = "0.15.0-dev"
 iced.features = ["tokio", "sipper", "markdown", "canvas", "highlighter"]
 
@@ -14,16 +25,14 @@ similar.version = "3"
 similar.features = ["inline"]
 
 tokio.version = "1"
-tokio.features = ["fs", "macros", "process", "sync", "test-util"]
+tokio.features = ["fs", "process", "sync"]
 
 tracing-subscriber.version = "0.3"
 tracing-subscriber.features = ["tracing-log"]
 
-function = "0.3"
-log = "0.4"
-reason = "0.2.0-dev"
-serde_json = "1"
-sipper = "0.2"
+[dev-dependencies]
+tokio.version = "1"
+tokio.features = ["macros", "test-util"]
 
 [lints.clippy]
 large-enum-variant = "allow"
@@ -33,11 +42,15 @@ type-complexity = "allow"
 cosmic-text.git = "https://github.com/hecrj/cosmic-text.git"
 cosmic-text.rev = "6e10ac2ce889f48c9eeb1f19c1340a37d6afae31"
 
+decoder.git = "https://github.com/hecrj/decoder.git"
+decoder.rev = "c2b759faa6cc49a4fd25271c7149028e6ff395c3"
+
 iced.git = "https://github.com/iced-rs/iced.git"
-iced.rev = "0a367b3ea15115260934b15289573c9f49e7b067"
+iced.rev = "8caf9e44f358c15a5e1031d16d30f2346c2f5bab"
 
 reason.git = "https://github.com/hecrj/reason.git"
-reason.rev = "9d3a1f54afb345f9bdc6fc3b5e016b88bda62b71"
+reason.rev = "d3d81d9de38a7fbd9bb95a9fe0111d4e295006d4"
 
 # iced.path = "../iced"
 # reason.path = "../reason"
+# decoder.path = "../decoder"

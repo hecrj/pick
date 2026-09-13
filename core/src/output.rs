@@ -167,6 +167,48 @@ impl Output {
     pub fn all(&self) -> impl Iterator<Item = &str> {
         self.head.iter().chain(self.tail.iter()).map(String::as_str)
     }
+
+    pub(crate) fn encode(&self) -> decoder::Value {
+        use decoder::encode::{map, sequence, string, u64};
+
+        map([
+            ("line_cap", u64(self.line_cap as u64)),
+            ("byte_cap", u64(self.byte_cap as u64)),
+            ("head", sequence(string, &self.head)),
+            ("tail", sequence(string, &self.tail)),
+            ("lines", u64(self.lines as u64)),
+            ("bytes", u64(self.bytes as u64)),
+            ("retained", u64(self.retained as u64)),
+            ("front", u64(self.front as u64)),
+        ])
+        .into_value()
+    }
+
+    pub(crate) fn decode(value: decoder::Value) -> decoder::Result<Self> {
+        use decoder::decode::{map, sequence, string, u64};
+
+        let mut fields = map(value)?;
+
+        let head: VecDeque<String> = fields.required("head", sequence(string))?;
+        let tail: VecDeque<String> = fields.required("tail", sequence(string))?;
+
+        Ok(Self {
+            line_cap: fields.required("line_cap", u64)? as usize,
+            byte_cap: fields.required("byte_cap", u64)? as usize,
+            head,
+            tail,
+            lines: fields.required("lines", u64)? as usize,
+            bytes: fields.required("bytes", u64)? as usize,
+            retained: fields.required("retained", u64)? as usize,
+            front: fields.required("front", u64)? as usize,
+        })
+    }
+}
+
+impl Default for Output {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl std::fmt::Display for Output {

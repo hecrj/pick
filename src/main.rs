@@ -1,18 +1,20 @@
-mod file;
+use pick_core as core;
+
 mod font;
 mod highlight;
 mod item;
 mod locale;
 mod markdown;
-mod path;
 mod sandbox;
 mod tool;
 mod widget;
 
+use crate::core::Session;
+use crate::core::path;
+use crate::core::session;
 use crate::font::Font;
 use crate::item::Item;
 use crate::markdown::Markdown;
-use crate::path::PathBuf;
 use crate::tool::Tool;
 
 use iced::keyboard;
@@ -32,6 +34,7 @@ use reason::model;
 
 use std::collections::{BTreeMap, HashMap};
 use std::env;
+use std::path::PathBuf;
 
 /// The flag that runs the app without the bubblewrap sandbox.
 const LIVE: &str = "--we-doin-it-live";
@@ -47,10 +50,10 @@ fn main() -> Result<(), iced::Error> {
         .find(|arg| arg.as_str() != LIVE)
         .cloned();
 
-    // Re-execute under a bubblewrap sandbox, panicking when that is
-    // not possible; `--we-doin-it-live` skips the sandbox.
     let project = env::current_dir().unwrap_or_default();
 
+    // Re-execute under a sandbox, panicking when that is
+    // not possible; `--we-doin-it-live` skips the sandbox.
     if live {
         log::warn!("running unsandboxed: --we-doin-it-live was passed");
     } else {
@@ -79,6 +82,7 @@ struct Pick {
     models: BTreeMap<model::Id, reason::Model>,
     model: Option<model::Id>,
     messages: Vec<Item>,
+    last_saved: usize,
     input: text_editor::Content,
     input_height: f32,
     content_width: f32,
@@ -108,7 +112,9 @@ enum Connection {
 enum Message {
     Connected(Result<(Reason, Vec<reason::Model>), reason::Error>),
     ModelsListed(Result<Vec<reason::Model>, reason::Error>),
-    Reconnect,
+    Heartbeat,
+    SessionLoaded(Result<Session, reason::Error>),
+    SessionSaved(Result<usize, reason::Error>),
     InputChanged(text_editor::Action),
     InputResized(Size),
     ContentResized(Size),
@@ -126,11 +132,14 @@ enum Message {
 
 impl Pick {
     fn new(prompt: Option<&str>) -> (Self, Task<Message>) {
+        let project = env::current_dir().unwrap_or_default();
+
         let mut pick = Self {
             connection: Connection::Disconnected,
             models: BTreeMap::new(),
             model: None,
             messages: Vec::new(),
+            last_saved: 0,
             input: prompt
                 .map(text_editor::Content::with_text)
                 .unwrap_or_default(),
@@ -138,21 +147,26 @@ impl Pick {
             content_width: 0.0,
             snap_to_bottom: true,
             tasks: HashMap::new(),
-            project: env::current_dir().unwrap_or_default(),
+            project: project.clone(),
             home: env::home_dir(),
             server: "http://127.0.0.1:9931".to_owned(),
             tools: Tool::builtins(),
         };
 
-        let connect = pick.connect();
+        let load = Task::perform(
+            Session::load(project.join(".pick/session.jsonl")),
+            Message::SessionLoaded,
+        );
+
+        let boot = Task::batch([pick.connect(), load]);
 
         (
             pick,
             Task::batch([
                 if prompt.is_some() {
-                    connect.chain(Task::done(Message::Send))
+                    boot.chain(Task::done(Message::Send))
                 } else {
-                    connect
+                    boot
                 },
                 operation::focus("input"),
             ]),
@@ -199,12 +213,32 @@ impl Pick {
                 self.connection = Connection::Connected(reason);
                 self.update_models(models)
             }
-            Message::Reconnect => match &self.connection {
-                Connection::Disconnected => self.connect(),
-                Connection::Connected(_) => self.list_models(),
-                Connection::Connecting => Task::none(),
-            },
+            Message::Heartbeat => {
+                let reconnect = match &self.connection {
+                    Connection::Disconnected => self.connect(),
+                    Connection::Connected(_) => self.list_models(),
+                    Connection::Connecting => Task::none(),
+                };
+
+                Task::batch([reconnect, self.save()])
+            }
             Message::ModelsListed(Ok(models)) => self.update_models(models),
+            Message::SessionLoaded(Ok(session)) => {
+                self.messages = session
+                    .items
+                    .into_iter()
+                    .map(|item| Item::from_session(&self.tools, item))
+                    .collect();
+
+                self.last_saved = self.messages.len();
+
+                operation::snap_to_end("scroll")
+            }
+            Message::SessionSaved(Ok(last_saved)) => {
+                self.last_saved = last_saved;
+
+                Task::none()
+            }
             Message::InputChanged(action) => {
                 self.input.perform(action);
 
@@ -457,6 +491,16 @@ impl Pick {
 
                 Task::none()
             }
+            Message::SessionLoaded(Err(error)) => {
+                log::error!("session failed to load: {error}");
+
+                Task::none()
+            }
+            Message::SessionSaved(Err(error)) => {
+                log::warn!("session failed to save: {error}");
+
+                Task::none()
+            }
         }
     }
 
@@ -683,6 +727,38 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
         Some(reply)
     }
 
+    fn save(&self) -> Task<Message> {
+        let new_events: Vec<_> = self
+            .messages
+            .iter()
+            .enumerate()
+            .skip(self.last_saved)
+            .take_while(|(i, item)| match item {
+                Item::User(_) => true,
+                Item::Assistant(_) => i + 1 != self.messages.len() || self.tasks.is_empty(),
+                Item::Tool(tool_run) => !matches!(tool_run.status, item::Status::Running { .. }),
+                Item::Compaction(compaction) => compaction.is_finished,
+            })
+            .map(|(_, item)| item.to_session())
+            .map(session::Event::ItemAdded)
+            .collect();
+
+        let session = self.project.join(".pick/session.jsonl");
+        let new_last_saved = self.last_saved + new_events.len();
+
+        Task::perform(
+            async move {
+                if let Some(directory) = session.parent() {
+                    tokio::fs::create_dir_all(directory).await?;
+                }
+
+                let _ = Session::append(session, new_events).await?;
+                Ok(new_last_saved)
+            },
+            Message::SessionSaved,
+        )
+    }
+
     fn view(&self) -> Element<'_, Message> {
         const MAX_WIDTH: u32 = 770;
 
@@ -829,7 +905,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        time::every(time::seconds(10)).map(|_| Message::Reconnect)
+        time::every(time::seconds(10)).map(|_| Message::Heartbeat)
     }
 
     fn context_size(&self) -> Option<u64> {

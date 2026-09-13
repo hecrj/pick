@@ -1,8 +1,7 @@
-use sipper::sipper;
+use crate::tool;
 
 use iced::{Element, Never};
-
-use crate::tool::output;
+use sipper::sipper;
 
 use std::borrow::Cow;
 use std::path::Path;
@@ -27,18 +26,16 @@ pub trait Call {
     }
 }
 
-pub type Output = ::core::result::Result<output::Output, reason::Error>;
+pub type Output = Result<tool::Output, reason::Error>;
 pub type Run = Pin<Box<dyn sipper::Core<Output = Output, Item = String> + Send>>;
 
 pub fn straw<F>(f: impl FnOnce(sipper::Sender<String>) -> F + Send + 'static) -> Run
 where
-    F: Future<Output = Result<output::Output, reason::Error>> + Send,
+    F: Future<Output = Output> + Send,
 {
     Box::pin(sipper(async move |sender| f(sender).await))
 }
 
-pub fn future(
-    f: impl Future<Output = Result<output::Output, reason::Error>> + Send + 'static,
-) -> Run {
+pub fn future(f: impl Future<Output = Output> + Send + 'static) -> Run {
     Box::pin(sipper(move |_sender| f))
 }

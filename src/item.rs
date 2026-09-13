@@ -1,3 +1,5 @@
+mod conversion;
+
 use crate::font;
 use crate::locale;
 use crate::markdown::{self, Markdown};

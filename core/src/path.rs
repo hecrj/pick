@@ -1,4 +1,4 @@
-pub use std::path::{Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 pub fn tildify(path: &Path, home: Option<&Path>) -> PathBuf {
     let Some(home) = home else {
