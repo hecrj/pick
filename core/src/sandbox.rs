@@ -8,9 +8,9 @@
 //! - the sandboxed process has no host identity and cannot see or
 //!   signal host processes;
 //! - the root filesystem is read-only, with the project, the
-//!   user's projects directory, and a scratchpad under the host's
-//!   temp directory as the only writable places besides the
-//!   ssh-agent socket;
+//!   project's data directory, the user's projects directory, and
+//!   a scratchpad under the host's temp directory as the only
+//!   writable places besides the ssh-agent socket;
 //! - the home directory is hidden, with only the Rust toolchain
 //!   remounted;
 //! - the environment is cleared down to `PATH`, `HOME`, `USER`,
@@ -23,13 +23,15 @@
 //!
 //! [`enter`] is called once from `main`. When the re-execution
 //! succeeds it does not return: the process image is replaced, and
-//! the new process re-enters `main` with [`MARKER`] set, where it
-//! becomes a no-op. When a sandbox cannot be started, it reports
-//! why, so `main` can panic rather than keep running bare; the
-//! `--we-doin-it-live` flag skips the sandbox entirely.
+//! the new process re-enters `main` with the `PICK_SANDBOXED`
+//! environment variable set, where it becomes a no-op. When a
+//! sandbox cannot be started, it reports why, so `main` can panic
+//! rather than keep running bare; the `--we-doin-it-live` flag skips
+//! the sandbox entirely.
+use crate::Project;
+
 use std::env;
 use std::fmt;
-use std::path::Path;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -39,12 +41,13 @@ mod linux;
 const MARKER: &str = "PICK_SANDBOXED";
 
 /// Re-executes the process under a sandbox in which `project`,
-/// the directory the tools operate in, and the user's projects
-/// directory are the only writable places, besides the scratchpad
-/// under the host's temp directory.
+/// the directory the tools operate in, the project's data
+/// directory, and the user's projects directory are the only
+/// writable places, besides the scratchpad under the host's temp
+/// directory.
 ///
 /// See the module documentation for the policy.
-pub fn enter(_project: &Path) -> Result<(), Error> {
+pub fn enter(_project: &Project) -> Result<(), Error> {
     if env::var_os(MARKER).is_some() {
         return Ok(());
     }
@@ -72,6 +75,8 @@ pub enum Error {
     Probe(String),
     /// The project directory could not be resolved.
     Project,
+    /// The project's data directory could not be created.
+    DataDir(String),
     /// The scratchpad under the host's temp directory could not
     /// be prepared.
     Scratch(String),
@@ -92,6 +97,12 @@ impl fmt::Display for Error {
                 }
             }
             Self::Project => f.write_str("the project directory could not be resolved"),
+            Self::DataDir(detail) => {
+                write!(
+                    f,
+                    "the project's data directory could not be created: {detail}"
+                )
+            }
             Self::Scratch(detail) => {
                 write!(f, "the scratchpad could not be prepared: {detail}")
             }

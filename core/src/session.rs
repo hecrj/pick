@@ -1,26 +1,26 @@
-use crate::Output;
 use crate::file;
+use crate::{Output, Project};
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 /// A session's file: an opaque handle to one of the project's
-/// `.pick/sessions/*.jsonl` files.
+/// session files, a `.jsonl` log of items.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct File(PathBuf);
 
 impl File {
     /// The directory in which the project's sessions live.
-    fn sessions_dir(project: &Path) -> PathBuf {
-        project.join(".pick/sessions")
+    fn directory(project: &Project) -> PathBuf {
+        project.data_dir().join("sessions")
     }
 
     /// The file of a new session, named by its start:
     /// `YYYYMMDD-HHMMSS` in the local time, with the sub-second
     /// digits appended when a session already holds the name, so
     /// the names stay chronological under plain string order.
-    pub fn fresh(project: &Path) -> Self {
-        let dir = Self::sessions_dir(project);
+    pub fn new(project: &Project) -> Self {
+        let dir = Self::directory(project);
 
         let now = jiff::Timestamp::now();
         let now = now.to_zoned(jiff::tz::TimeZone::system());
@@ -48,8 +48,8 @@ impl File {
 
     /// The newest of the project's sessions, if there are any: the
     /// greatest name, which is the newest by construction.
-    pub fn latest(project: &Path) -> Option<Self> {
-        let dir = Self::sessions_dir(project);
+    pub fn latest(project: &Project) -> Option<Self> {
+        let dir = Self::directory(project);
 
         std::fs::read_dir(&dir)
             .ok()?
@@ -61,10 +61,10 @@ impl File {
     }
 
     /// Resolves `path` to one of the project's existing sessions:
-    /// as given, relative to the project, or by name in
-    /// `.pick/sessions`, with or without the extension.
-    pub fn existing(project: &Path, path: &str) -> Option<Self> {
-        let dir = Self::sessions_dir(project);
+    /// as given, relative to the project, or by name in the
+    /// sessions directory, with or without the extension.
+    pub fn existing(project: &Project, path: &str) -> Option<Self> {
+        let dir = Self::directory(project);
 
         let candidates = [
             PathBuf::from(path),
@@ -601,6 +601,7 @@ impl Compaction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pick_test::Directory;
     use std::time::Duration;
 
     fn at(secs: u64) -> SystemTime {
@@ -1050,15 +1051,18 @@ mod tests {
 
     #[test]
     fn a_fresh_file_stays_unique_and_orderly() {
-        let project = std::env::temp_dir().join(format!("pick-sessions-a-{}", std::process::id()));
-        std::fs::create_dir_all(File::sessions_dir(&project)).unwrap();
+        let project = Project::new(
+            std::env::temp_dir().join(format!("pick-sessions-a-{}", std::process::id())),
+        );
+        let _data_dir = Directory::create(project.data_dir()).unwrap();
+        std::fs::create_dir_all(File::directory(&project)).unwrap();
 
-        let first = File::fresh(&project);
+        let first = File::new(&project);
         std::fs::write(&first, "").unwrap();
 
         // A second session in the same second sorts after the
         // first, so `latest` picks it.
-        let second = File::fresh(&project);
+        let second = File::new(&project);
 
         assert!(second > first);
 
@@ -1069,14 +1073,15 @@ mod tests {
         assert_eq!(stem.len(), 15);
         assert_eq!(&stem[8..9], "-");
         assert!(stem.chars().all(|c| c.is_ascii_digit() || c == '-'));
-
-        std::fs::remove_dir_all(&project).ok();
     }
 
     #[test]
     fn the_latest_file_is_the_greatest_name() {
-        let project = std::env::temp_dir().join(format!("pick-sessions-b-{}", std::process::id()));
-        let dir = File::sessions_dir(&project);
+        let project = Project::new(
+            std::env::temp_dir().join(format!("pick-sessions-b-{}", std::process::id())),
+        );
+        let _data_dir = Directory::create(project.data_dir()).unwrap();
+        let dir = File::directory(&project);
         std::fs::create_dir_all(&dir).unwrap();
 
         std::fs::write(dir.join("20250914-090000.jsonl"), "").unwrap();
@@ -1088,27 +1093,30 @@ mod tests {
             File::latest(&project),
             Some(File(dir.join("20250914-103015123.jsonl")))
         );
-
-        std::fs::remove_dir_all(&project).ok();
     }
 
     #[test]
     fn a_missing_sessions_dir_has_no_latest_file() {
-        let project = std::env::temp_dir().join(format!("pick-sessions-c-{}", std::process::id()));
+        let project = Project::new(
+            std::env::temp_dir().join(format!("pick-sessions-c-{}", std::process::id())),
+        );
 
         assert_eq!(File::latest(&project), None);
     }
 
     #[test]
     fn an_existing_session_resolves_by_name_and_path() {
-        let project = std::env::temp_dir().join(format!("pick-sessions-d-{}", std::process::id()));
-        let dir = File::sessions_dir(&project);
+        let project = Project::new(
+            std::env::temp_dir().join(format!("pick-sessions-d-{}", std::process::id())),
+        );
+        let _data_dir = Directory::create(project.data_dir()).unwrap();
+        let dir = File::directory(&project);
         std::fs::create_dir_all(&dir).unwrap();
 
         std::fs::write(dir.join("20250914-090000.jsonl"), "").unwrap();
 
         // By bare name in the sessions directory, with or without
-        // the extension, and by path.
+        // the extension, and by absolute path.
         assert_eq!(
             File::existing(&project, "20250914-090000"),
             Some(File(dir.join("20250914-090000.jsonl")))
@@ -1117,14 +1125,13 @@ mod tests {
             File::existing(&project, "20250914-090000.jsonl"),
             Some(File(dir.join("20250914-090000.jsonl")))
         );
+        let absolute = dir.join("20250914-090000.jsonl");
         assert_eq!(
-            File::existing(&project, ".pick/sessions/20250914-090000.jsonl"),
-            Some(File(dir.join("20250914-090000.jsonl")))
+            File::existing(&project, absolute.to_str().unwrap()),
+            Some(File(absolute))
         );
 
         // A name no session holds resolves to nothing.
         assert_eq!(File::existing(&project, "19700101-000000"), None);
-
-        std::fs::remove_dir_all(&project).ok();
     }
 }

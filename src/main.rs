@@ -5,13 +5,13 @@ mod highlight;
 mod item;
 mod locale;
 mod markdown;
-mod sandbox;
 mod tool;
 mod widget;
 
-use crate::core::Session;
 use crate::core::path;
+use crate::core::sandbox;
 use crate::core::session;
+use crate::core::{Project, Session};
 use crate::font::Font;
 use crate::item::Item;
 use crate::markdown::Markdown;
@@ -68,7 +68,7 @@ fn main() -> Result<(), iced::Error> {
         })
         .cloned();
 
-    let project = env::current_dir().unwrap_or_default();
+    let project = Project::current_dir().expect("the current directory must be resolvable");
 
     // Re-execute under a sandbox, panicking when that is
     // not possible; `--we-doin-it-live` skips the sandbox.
@@ -91,9 +91,9 @@ fn main() -> Result<(), iced::Error> {
             std::process::exit(1);
         }),
         None if resume => {
-            session::File::latest(&project).unwrap_or_else(|| session::File::fresh(&project))
+            session::File::latest(&project).unwrap_or_else(|| session::File::new(&project))
         }
-        None => session::File::fresh(&project),
+        None => session::File::new(&project),
     };
 
     iced::application(

@@ -245,15 +245,18 @@ impl Call for Read {
 #[cfg(test)]
 mod tests {
     use super::{Call, MAX_OUTPUT_BYTES, MAX_READ_BYTES, MAX_READ_LIMIT, READ_CHUNK_SIZE, Read};
-    use std::path::{Path, PathBuf};
+    use pick_test::Directory;
+    use std::path::Path;
 
-    /// Creates a temporary project directory holding the given files.
-    fn project(test: &str, files: &[(&str, &str)]) -> PathBuf {
-        let root = std::env::temp_dir()
-            .join(format!("pick-read-test-{}", std::process::id()))
-            .join(test);
-
-        std::fs::create_dir_all(&root).unwrap();
+    /// Creates a temporary project directory holding the given
+    /// files, removed on drop.
+    fn project(test: &str, files: &[(&str, &str)]) -> Directory {
+        let root = Directory::create(
+            std::env::temp_dir()
+                .join(format!("pick-read-test-{}", std::process::id()))
+                .join(test),
+        )
+        .unwrap();
 
         for (name, contents) in files {
             std::fs::write(root.join(name), contents).unwrap();
@@ -287,8 +290,6 @@ mod tests {
 
         assert_eq!(read("small.txt", &root).await, "a\nb\nc");
         assert_eq!(read("empty.txt", &root).await, "[File is empty]");
-
-        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[tokio::test]
@@ -306,8 +307,6 @@ mod tests {
         let output = read("fitting.txt", &root).await;
 
         assert_eq!(output, contents.trim_end_matches('\n'));
-
-        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[tokio::test]
@@ -325,8 +324,6 @@ mod tests {
         let output = read("exact.txt", &root).await;
 
         assert_eq!(output, contents.trim_end_matches('\n'));
-
-        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[tokio::test]
@@ -350,8 +347,6 @@ mod tests {
         )));
         // No part of the very long line leaks into the output.
         assert!(!output.contains('x'));
-
-        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[tokio::test]
@@ -373,8 +368,6 @@ mod tests {
             offset=501, or inspect the file with bash]"
         )));
         assert!(!output.contains('x'));
-
-        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[tokio::test]
@@ -401,8 +394,6 @@ mod tests {
         // 655 lines of 99 characters, joined by newlines, plus the
         // newline before the notice.
         assert_eq!(output.len(), 655 * 100 + notice.len());
-
-        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[tokio::test]
@@ -426,8 +417,6 @@ mod tests {
         assert!(!output.contains('['));
         // 501 lines of 99 characters, no trailing newline.
         assert_eq!(output.len(), 501 * 99 + 500);
-
-        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[tokio::test]
@@ -442,8 +431,6 @@ mod tests {
                 bytes; the file's lines may be very long]"
             )
         );
-
-        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[tokio::test]
@@ -466,8 +453,6 @@ mod tests {
                 byte output limit; inspect the file with bash]"
             )
         );
-
-        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[tokio::test]
@@ -491,8 +476,6 @@ mod tests {
                 small.len()
             )
         );
-
-        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[tokio::test]
@@ -508,8 +491,6 @@ mod tests {
         // middle lines are elided.
         assert!(!output.contains("elided"));
         assert!(output.ends_with("[File has more lines; continue reading with offset=1001]"));
-
-        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[tokio::test]
@@ -536,8 +517,6 @@ mod tests {
         let output = read("boundary.txt", &root).await;
 
         assert!(output.ends_with("[File has more lines; continue reading with offset=1001]"));
-
-        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[tokio::test]
@@ -573,8 +552,6 @@ mod tests {
                 "[File has more lines; continue reading with offset=6]"
             ]
         );
-
-        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[tokio::test]
@@ -588,7 +565,5 @@ mod tests {
         let output = read_at("max.txt", &root, None, Some(MAX_READ_LIMIT)).await;
 
         assert_eq!(output, contents.trim_end_matches('\n'));
-
-        std::fs::remove_dir_all(&root).unwrap();
     }
 }
