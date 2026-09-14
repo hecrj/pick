@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 decoder = "0.0.3"
+jiff = "0.2"
 reason = "0.2.0-dev"
 serde_json = "1"
 

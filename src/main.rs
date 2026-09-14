@@ -39,15 +39,33 @@ use std::path::PathBuf;
 /// The flag that runs the app without the bubblewrap sandbox.
 const LIVE: &str = "--we-doin-it-live";
 
+/// The flag that resumes a session instead of starting a fresh
+/// one: the newest, or the one at the path that follows it.
+const RESUME: &str = "--resume";
+
 fn main() -> Result<(), iced::Error> {
     tracing_subscriber::fmt::init();
 
     let args: Vec<_> = env::args().collect();
     let live = args.iter().any(|arg| arg.as_str() == LIVE);
+    let resume = args.iter().any(|arg| arg.as_str() == RESUME);
+
+    // `--resume [PATH]` resumes a session instead of starting a
+    // fresh one: the newest one when the path is left out.
+    let resume_path = args
+        .iter()
+        .position(|arg| arg.as_str() == RESUME)
+        .and_then(|i| args.get(i + 1))
+        .filter(|arg| !arg.starts_with('-'))
+        .cloned();
+
     let prompt = args
         .iter()
         .skip(1)
-        .find(|arg| arg.as_str() != LIVE)
+        .find(|arg| {
+            let arg = arg.as_str();
+            arg != LIVE && arg != RESUME && Some(arg) != resume_path.as_deref()
+        })
         .cloned();
 
     let project = env::current_dir().unwrap_or_default();
@@ -65,8 +83,21 @@ fn main() -> Result<(), iced::Error> {
         }
     }
 
+    // Fresh by default; `--resume` picks up the newest session,
+    // or the one at the path that follows the flag.
+    let session = match resume_path {
+        Some(path) => session::File::existing(&project, &path).unwrap_or_else(|| {
+            eprintln!("no such session: {path}");
+            std::process::exit(1);
+        }),
+        None if resume => {
+            session::File::latest(&project).unwrap_or_else(|| session::File::fresh(&project))
+        }
+        None => session::File::fresh(&project),
+    };
+
     iced::application(
-        move || Pick::new(prompt.as_deref()),
+        move || Pick::new(prompt.as_deref(), &session),
         Pick::update,
         Pick::view,
     )
@@ -90,6 +121,7 @@ struct Pick {
     tasks: HashMap<Work, task::Handle>,
     tools: HashMap<&'static str, Tool>,
     project: PathBuf,
+    session: session::File,
     home: Option<PathBuf>,
     server: String,
 }
@@ -131,8 +163,9 @@ enum Message {
 }
 
 impl Pick {
-    fn new(prompt: Option<&str>) -> (Self, Task<Message>) {
+    fn new(prompt: Option<&str>, session: &session::File) -> (Self, Task<Message>) {
         let project = env::current_dir().unwrap_or_default();
+        let session = session.clone();
 
         let mut pick = Self {
             connection: Connection::Disconnected,
@@ -148,13 +181,14 @@ impl Pick {
             snap_to_bottom: true,
             tasks: HashMap::new(),
             project: project.clone(),
+            session: session.clone(),
             home: env::home_dir(),
             server: "http://127.0.0.1:9931".to_owned(),
             tools: Tool::builtins(),
         };
 
         let load = Task::perform(
-            Session::load(project.join(".pick/session.jsonl")),
+            async move { Session::load(&session).await },
             Message::SessionLoaded,
         );
 
@@ -743,16 +777,13 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
             .map(session::Event::ItemAdded)
             .collect();
 
-        let session = self.project.join(".pick/session.jsonl");
+        let session = self.session.clone();
         let new_last_saved = self.last_saved + new_events.len();
 
         Task::perform(
             async move {
-                if let Some(directory) = session.parent() {
-                    tokio::fs::create_dir_all(directory).await?;
-                }
+                Session::append(&session, new_events).await?;
 
-                let _ = Session::append(session, new_events).await?;
                 Ok(new_last_saved)
             },
             Message::SessionSaved,

@@ -1,8 +1,94 @@
 use crate::Output;
 use crate::file;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+
+/// A session's file: an opaque handle to one of the project's
+/// `.pick/sessions/*.jsonl` files.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct File(PathBuf);
+
+impl File {
+    /// The directory in which the project's sessions live.
+    fn sessions_dir(project: &Path) -> PathBuf {
+        project.join(".pick/sessions")
+    }
+
+    /// The file of a new session, named by its start:
+    /// `YYYYMMDD-HHMMSS` in the local time, with the sub-second
+    /// digits appended when a session already holds the name, so
+    /// the names stay chronological under plain string order.
+    pub fn fresh(project: &Path) -> Self {
+        let dir = Self::sessions_dir(project);
+
+        let now = jiff::Timestamp::now();
+        let now = now.to_zoned(jiff::tz::TimeZone::system());
+        let name = now.strftime("%Y%m%d-%H%M%S").to_string();
+
+        let mut file = format!("{name}.jsonl");
+
+        // A session started in the same second (or same
+        // millisecond) appends its sub-second digits — which sort
+        // after the extension dot — so `latest` can still tell them
+        // apart.
+        if dir.join(&file).exists() {
+            file = format!("{name}{:03}.jsonl", now.millisecond());
+        }
+        if dir.join(&file).exists() {
+            file = format!(
+                "{name}{:03}{:03}.jsonl",
+                now.millisecond(),
+                now.nanosecond()
+            );
+        }
+
+        Self(dir.join(file))
+    }
+
+    /// The newest of the project's sessions, if there are any: the
+    /// greatest name, which is the newest by construction.
+    pub fn latest(project: &Path) -> Option<Self> {
+        let dir = Self::sessions_dir(project);
+
+        std::fs::read_dir(&dir)
+            .ok()?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+            .max()
+            .map(Self)
+    }
+
+    /// Resolves `path` to one of the project's existing sessions:
+    /// as given, relative to the project, or by name in
+    /// `.pick/sessions`, with or without the extension.
+    pub fn existing(project: &Path, path: &str) -> Option<Self> {
+        let dir = Self::sessions_dir(project);
+
+        let candidates = [
+            PathBuf::from(path),
+            project.join(path),
+            dir.join(path),
+            dir.join(format!("{path}.jsonl")),
+        ];
+
+        candidates
+            .iter()
+            .find(|candidate| candidate.is_file())
+            .map(|candidate| Self(candidate.clone()))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for File {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Session {
@@ -12,18 +98,18 @@ pub struct Session {
 }
 
 impl Session {
-    /// Loads the session at `path`, or an empty session when the
+    /// Loads the session in `session`, or an empty session when the
     /// file does not exist yet: the first `append` creates it.
-    pub async fn load(path: impl AsRef<Path>) -> Result<Self, reason::Error> {
+    pub async fn load(session: &File) -> Result<Self, reason::Error> {
         use std::io::BufRead;
+
+        let path = session.path().to_path_buf();
 
         let mut session = Self {
             version: Version::current(),
             started_at: SystemTime::now(),
             items: Vec::new(),
         };
-
-        let path = path.as_ref().to_path_buf();
 
         tokio::task::spawn_blocking(move || {
             let file = match std::fs::File::open(&path) {
@@ -66,18 +152,23 @@ impl Session {
     }
 
     pub async fn append(
-        path: impl AsRef<Path>,
+        session: &File,
         events: impl IntoIterator<Item = Event> + Send + 'static,
     ) -> Result<SystemTime, reason::Error> {
         use tokio::io::AsyncWriteExt;
 
         // Appends to the same session are serialized, so the
         // `created` frame is written by exactly one of them.
-        let _lock = file::lock(&path).await;
+        let _lock = file::lock(session).await;
+
+        // The sessions directory is created on first use.
+        if let Some(directory) = session.path().parent() {
+            tokio::fs::create_dir_all(directory).await?;
+        }
 
         let now = SystemTime::now();
 
-        if !tokio::fs::try_exists(&path).await? {
+        if !tokio::fs::try_exists(session).await? {
             let mut created = serde_json::to_string(
                 &Frame {
                     event: Event::Created(Version::current()),
@@ -87,7 +178,7 @@ impl Session {
             )?;
             created.push('\n');
 
-            tokio::fs::write(&path, created).await?;
+            tokio::fs::write(session, created).await?;
         }
 
         let json = tokio::task::spawn_blocking(move || {
@@ -105,7 +196,7 @@ impl Session {
 
         let file = tokio::fs::OpenOptions::new()
             .append(true)
-            .open(path)
+            .open(session)
             .await?;
 
         let mut writer = tokio::io::BufWriter::new(file);
@@ -751,15 +842,16 @@ mod tests {
 
     #[tokio::test]
     async fn a_session_loads_what_it_appends() {
-        let path = std::env::temp_dir().join(format!("pick-session-test-{}", std::process::id()));
-        std::fs::remove_file(&path).ok();
+        let file =
+            File(std::env::temp_dir().join(format!("pick-session-test-{}", std::process::id())));
+        std::fs::remove_file(&file).ok();
 
-        let at = Session::append(&path, [Event::ItemAdded(Item::User("hello".to_owned()))])
+        let at = Session::append(&file, [Event::ItemAdded(Item::User("hello".to_owned()))])
             .await
             .expect("append item frame");
 
-        let session = Session::load(&path).await.expect("load session");
-        std::fs::remove_file(&path).ok();
+        let session = Session::load(&file).await.expect("load session");
+        std::fs::remove_file(&file).ok();
 
         assert_eq!(session.started_at, at);
         assert!(matches!(
@@ -770,27 +862,28 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_file_loads_an_empty_session() {
-        let path =
-            std::env::temp_dir().join(format!("pick-session-missing-{}", std::process::id()));
-        std::fs::remove_file(&path).ok();
+        let file =
+            File(std::env::temp_dir().join(format!("pick-session-missing-{}", std::process::id())));
+        std::fs::remove_file(&file).ok();
 
-        let session = Session::load(&path).await.expect("load missing session");
+        let session = Session::load(&file).await.expect("load missing session");
 
         assert!(session.items.is_empty());
     }
 
     #[tokio::test]
     async fn concurrent_appends_to_the_same_session_are_serialized() {
-        let path = std::env::temp_dir().join(format!("pick-session-race-{}", std::process::id()));
-        std::fs::remove_file(&path).ok();
+        let file =
+            File(std::env::temp_dir().join(format!("pick-session-race-{}", std::process::id())));
+        std::fs::remove_file(&file).ok();
 
         let mut tasks = Vec::new();
 
         for n in 0..8 {
-            let path = path.clone();
+            let file = file.clone();
 
             tasks.push(tokio::spawn(async move {
-                Session::append(&path, [Event::ItemAdded(Item::User(format!("item {n}")))])
+                Session::append(&file, [Event::ItemAdded(Item::User(format!("item {n}")))])
                     .await
                     .expect("append item frame")
             }));
@@ -800,15 +893,15 @@ mod tests {
             task.await.expect("append task");
         }
 
-        let contents = std::fs::read_to_string(&path).expect("read session file");
+        let contents = std::fs::read_to_string(&file).expect("read session file");
 
         // No two appends may both create the file, so there is
         // exactly one `created` frame, and no item frame is lost:
         // one plus eight lines.
         assert_eq!(contents.lines().count(), 9);
 
-        let session = Session::load(&path).await.expect("load session");
-        std::fs::remove_file(&path).ok();
+        let session = Session::load(&file).await.expect("load session");
+        std::fs::remove_file(&file).ok();
 
         assert_eq!(session.items.len(), 8);
     }
@@ -911,14 +1004,15 @@ mod tests {
 
     #[tokio::test]
     async fn a_load_answers_the_calls_a_crash_left_open() {
-        let path = std::env::temp_dir().join(format!("pick-session-crash-{}", std::process::id()));
-        std::fs::remove_file(&path).ok();
+        let file =
+            File(std::env::temp_dir().join(format!("pick-session-crash-{}", std::process::id())));
+        std::fs::remove_file(&file).ok();
 
         // A batch of two, the first settled, the second still
         // running when the process died: the settle filter saved the
         // assistant and the first tool, and stopped there.
         Session::append(
-            &path,
+            &file,
             [
                 Event::ItemAdded(Item::User("build it".to_owned())),
                 Event::ItemAdded(assistant(vec![call_a(), call_b()])),
@@ -933,8 +1027,8 @@ mod tests {
         .await
         .expect("append frames");
 
-        let session = Session::load(&path).await.expect("load session");
-        std::fs::remove_file(&path).ok();
+        let session = Session::load(&file).await.expect("load session");
+        std::fs::remove_file(&file).ok();
 
         // The settled tool is untouched; the one the crash left
         // running is answered, after it.
@@ -952,5 +1046,85 @@ mod tests {
         assert_eq!(settled.call.id.as_str(), "call_a");
         assert_eq!(answered.call.id.as_str(), "call_b");
         assert!(matches!(answered.status, Status::Aborted));
+    }
+
+    #[test]
+    fn a_fresh_file_stays_unique_and_orderly() {
+        let project = std::env::temp_dir().join(format!("pick-sessions-a-{}", std::process::id()));
+        std::fs::create_dir_all(File::sessions_dir(&project)).unwrap();
+
+        let first = File::fresh(&project);
+        std::fs::write(&first, "").unwrap();
+
+        // A second session in the same second sorts after the
+        // first, so `latest` picks it.
+        let second = File::fresh(&project);
+
+        assert!(second > first);
+
+        // The name is `YYYYMMDD-HHMMSS` — 15 characters, with the
+        // dash between the date and the time — so string order is
+        // chronological.
+        let stem = first.path().file_stem().unwrap().to_str().unwrap();
+        assert_eq!(stem.len(), 15);
+        assert_eq!(&stem[8..9], "-");
+        assert!(stem.chars().all(|c| c.is_ascii_digit() || c == '-'));
+
+        std::fs::remove_dir_all(&project).ok();
+    }
+
+    #[test]
+    fn the_latest_file_is_the_greatest_name() {
+        let project = std::env::temp_dir().join(format!("pick-sessions-b-{}", std::process::id()));
+        let dir = File::sessions_dir(&project);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(dir.join("20250914-090000.jsonl"), "").unwrap();
+        std::fs::write(dir.join("20250914-103015.jsonl"), "").unwrap();
+        std::fs::write(dir.join("20250914-103015123.jsonl"), "").unwrap();
+        std::fs::write(dir.join("notes.txt"), "").unwrap();
+
+        assert_eq!(
+            File::latest(&project),
+            Some(File(dir.join("20250914-103015123.jsonl")))
+        );
+
+        std::fs::remove_dir_all(&project).ok();
+    }
+
+    #[test]
+    fn a_missing_sessions_dir_has_no_latest_file() {
+        let project = std::env::temp_dir().join(format!("pick-sessions-c-{}", std::process::id()));
+
+        assert_eq!(File::latest(&project), None);
+    }
+
+    #[test]
+    fn an_existing_session_resolves_by_name_and_path() {
+        let project = std::env::temp_dir().join(format!("pick-sessions-d-{}", std::process::id()));
+        let dir = File::sessions_dir(&project);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(dir.join("20250914-090000.jsonl"), "").unwrap();
+
+        // By bare name in the sessions directory, with or without
+        // the extension, and by path.
+        assert_eq!(
+            File::existing(&project, "20250914-090000"),
+            Some(File(dir.join("20250914-090000.jsonl")))
+        );
+        assert_eq!(
+            File::existing(&project, "20250914-090000.jsonl"),
+            Some(File(dir.join("20250914-090000.jsonl")))
+        );
+        assert_eq!(
+            File::existing(&project, ".pick/sessions/20250914-090000.jsonl"),
+            Some(File(dir.join("20250914-090000.jsonl")))
+        );
+
+        // A name no session holds resolves to nothing.
+        assert_eq!(File::existing(&project, "19700101-000000"), None);
+
+        std::fs::remove_dir_all(&project).ok();
     }
 }
