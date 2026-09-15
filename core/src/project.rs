@@ -111,11 +111,26 @@ mod tests {
 
     #[test]
     fn a_non_utf8_name_falls_back_to_the_hash() {
-        use std::ffi::OsStr;
-        use std::os::unix::ffi::OsStrExt;
-
         // The file name is not UTF-8, so the id is named after the hash alone.
-        let name = id(Path::new(OsStr::from_bytes(b"/home/user/code/pick-\xff")));
+        #[cfg(unix)]
+        let path: PathBuf = {
+            use std::ffi::OsStr;
+            use std::os::unix::ffi::OsStrExt;
+
+            Path::new(OsStr::from_bytes(b"/home/user/code/pick-\xff")).to_path_buf()
+        };
+
+        #[cfg(windows)]
+        let path: PathBuf = {
+            use std::ffi::OsString;
+            use std::os::windows::ffi::OsStringExt;
+
+            // An unpaired surrogate is not valid UTF-8, so `to_str`
+            // returns `None`, like a non-UTF-8 name on Unix.
+            OsString::from_wide(&[0xdc00]).into()
+        };
+
+        let name = id(path);
 
         assert_eq!(name.0.len(), 8);
         assert!(name.0.chars().all(|c| c.is_ascii_hexdigit()), "{name}");

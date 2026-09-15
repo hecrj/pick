@@ -408,6 +408,7 @@ mod tests {
     use super::*;
     use pick_test::Directory;
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     fn repo(name: &str) -> Directory {
@@ -548,8 +549,13 @@ mod tests {
         git(&dir, &["mv", "héllo2.txt", "héllo2_renamed.txt"]);
         write(&dir, "héllo2_renamed.txt", "two\nmore\n");
         fs::write(dir.join("bin.txt"), "bin\0ary2").unwrap();
-        fs::set_permissions(dir.join("mode.txt"), fs::Permissions::from_mode(0o755)).unwrap();
-        fs::set_permissions(dir.join("mode2.txt"), fs::Permissions::from_mode(0o755)).unwrap();
+        // Windows file systems do not track the executable bit, so
+        // the mode changes below are Unix-only.
+        #[cfg(unix)]
+        {
+            fs::set_permissions(dir.join("mode.txt"), fs::Permissions::from_mode(0o755)).unwrap();
+            fs::set_permissions(dir.join("mode2.txt"), fs::Permissions::from_mode(0o755)).unwrap();
+        }
         write(&dir, "mode2.txt", "mode2\nedit\n");
         write(&dir, "nn.txt", "no_newline_changed");
         write(&dir, "crlf.txt", "crlf1x\r\ncrlf2\r\n");
@@ -568,7 +574,14 @@ mod tests {
         assert_eq!(status.deletions, 8);
 
         let diff = Diff::current(&project, &status).await.unwrap();
-        assert_eq!(diff.files.len(), 16);
+
+        // `mode.txt` surfaces as a mode-only entry, which is
+        // invisible on Windows, where modes are not tracked.
+        #[cfg(unix)]
+        let file_count = 16;
+        #[cfg(windows)]
+        let file_count = 15;
+        assert_eq!(diff.files.len(), file_count);
 
         // A modified file with two hunks; the second carries the
         // preceding line as its heading.
@@ -712,15 +725,21 @@ mod tests {
         assert!(file.hunks.is_empty());
         assert_eq!((file.insertions, file.deletions), (0, 0));
 
-        // A mode-only change.
-        let file = file_at(&diff.files, "mode.txt");
-        assert_eq!(file.state, State::ModeChanged);
-        assert!(file.mode_changed);
-        assert!(file.hunks.is_empty());
+        // A mode-only change; invisible on Windows, so
+        // `mode.txt` is not in the diff there at all.
+        #[cfg(unix)]
+        {
+            let file = file_at(&diff.files, "mode.txt");
+            assert_eq!(file.state, State::ModeChanged);
+            assert!(file.mode_changed);
+            assert!(file.hunks.is_empty());
+        }
 
-        // A mode change with content: both are recorded.
+        // A content change with, on Unix, a mode change as well:
+        // both are recorded.
         let file = file_at(&diff.files, "mode2.txt");
         assert_eq!(file.state, State::Modified);
+        #[cfg(unix)]
         assert!(file.mode_changed);
         assert_eq!(file.insertions, 1);
         assert_eq!(
