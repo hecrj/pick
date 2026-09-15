@@ -1,0 +1,558 @@
+use crate::highlight;
+
+use iced::border;
+use iced::highlighter;
+use iced::widget::{container, rich_text, span, text};
+use iced::{Code, Color, Element, Fill, Never, Theme};
+
+use similar::{ChangeTag, InlineChangeOptions, TextDiff};
+
+use std::ops::Range;
+use std::time::{Duration, Instant};
+
+/// The total time budget for refining intraline changes.
+const INLINE_DEADLINE: Duration = Duration::from_millis(10);
+const BACKGROUND_ALPHA: f32 = 0.10;
+const HIGHLIGHT_ALPHA: f32 = BACKGROUND_ALPHA * 2.0;
+
+pub struct Diff {
+    pub lines: Vec<Line>,
+}
+
+impl Diff {
+    pub fn new(path: &str, old: &str, new: &str) -> Self {
+        let palette = Palette::new(&Theme::CatppuccinMocha); // TODO: Pass `Theme` as argument
+        let diff = TextDiff::from_lines(old, new);
+        let options = InlineChangeOptions::default();
+        let deadline = Some(Instant::now() + INLINE_DEADLINE);
+
+        let settings = highlighter::Settings {
+            token: highlight::token(path),
+        };
+
+        let mut old_parser = highlighter::Parser::new(&settings);
+        let mut new_parser = highlighter::Parser::new(&settings);
+
+        let lines = diff
+            .iter_all_inline_changes_with_options_deadline(options, deadline)
+            .map(|change| {
+                let (prefix, style) = match change.tag() {
+                    ChangeTag::Insert => ('+', Some(palette.added)),
+                    ChangeTag::Delete => ('-', Some(palette.removed)),
+                    ChangeTag::Equal => (' ', None),
+                };
+
+                let line: String = change.values().iter().map(|&(_, value)| value).collect();
+
+                let scopes = match change.tag() {
+                    ChangeTag::Insert => new_parser.parse_line(&line),
+                    ChangeTag::Delete => old_parser.parse_line(&line),
+                    ChangeTag::Equal => {
+                        // The scopes are discarded, but the iterator must be
+                        // consumed: the old highlighter's state only
+                        // advances as the line is highlighted.
+                        old_parser.parse_line(&line).for_each(|_| {});
+                        new_parser.parse_line(&line)
+                    }
+                };
+
+                Line::new(
+                    prefix,
+                    &line,
+                    style,
+                    change.values().iter().copied(),
+                    scopes,
+                )
+            })
+            .collect();
+
+        Self { lines }
+    }
+
+    pub fn view(&self) -> impl Iterator<Item = Element<'_, Never>> {
+        self.lines.iter().map(|line| {
+            container(rich_text(line.spans.as_slice()).size(14))
+                .width(Fill)
+                .padding([2, 10])
+                .style(|_theme| container::Style::default().background(line.background))
+                .into()
+        })
+    }
+}
+
+/// A line of the edit diff.
+pub struct Line {
+    /// The overall background of the line itself.
+    background: Color,
+    /// The spans of the line, used only for the inline highlights.
+    spans: Vec<text::Span<'static>>,
+}
+
+impl Line {
+    fn new<'a>(
+        prefix: char,
+        line: &str,
+        style: Option<Color>,
+        values: impl IntoIterator<Item = (bool, &'a str)>,
+        scopes: impl IntoIterator<Item = (Range<usize>, Code)>,
+    ) -> Self {
+        let background = style
+            .map(|color| color.scale_alpha(BACKGROUND_ALPHA))
+            .unwrap_or(Color::TRANSPARENT);
+
+        let mut spans = vec![span(format!("{prefix} "))];
+
+        // Every line renders in its own `container`, so the
+        // terminator, whether it is `\n`, `\r\n`, or `\r`, is
+        // dropped from the end of the line, terminated or not.
+        let mut end = line.len();
+
+        if line.ends_with('\n') {
+            end -= '\n'.len_utf8();
+
+            if line[..end].ends_with('\r') {
+                end -= '\r'.len_utf8();
+            }
+        } else if line.ends_with('\r') {
+            end -= '\r'.len_utf8();
+        }
+
+        // The scopes partition the line from zero to its end, so a
+        // single cursor walks the segments and the scopes, cutting
+        // them at `end`. If the highlighter provides no scopes, or
+        // stops short of the end of the line, the remainder is
+        // rendered without syntax highlighting.
+        let mut position = 0;
+        let mut values = values.into_iter();
+        let mut scopes = scopes.into_iter();
+        let (mut range_end, mut scope) = scopes
+            .next()
+            .map(|(range, scope)| (range.end, scope))
+            .unwrap_or((line.len(), Code::Other));
+
+        let highlight = style.map(|color| color.scale_alpha(HIGHLIGHT_ALPHA));
+
+        while let Some((emphasized, mut value)) = values.next() {
+            if let Some(highlight) = highlight
+                && emphasized
+            {
+                let mut total = value.len();
+                let mut is_over = true;
+
+                // Unify all emphasized ranges
+                for (emphasized, other) in values.by_ref() {
+                    if !emphasized {
+                        value = other;
+                        is_over = false;
+                        break;
+                    }
+
+                    total += other.len();
+                }
+
+                spans.push(
+                    span(&line[position..position + total])
+                        .background(highlight)
+                        .border(border::rounded(2))
+                        .to_static(),
+                );
+
+                position += total;
+
+                if is_over {
+                    break;
+                }
+            }
+
+            let stop = end.min(position + value.len());
+
+            while position < stop {
+                // Running out of scopes leaves the remainder of the
+                // line without syntax highlighting.
+                while range_end <= position {
+                    match scopes.next() {
+                        Some((range, new_scope)) => {
+                            range_end = range.end;
+                            scope = new_scope;
+                        }
+                        None => {
+                            range_end = line.len();
+                            scope = Code::Other;
+                        }
+                    }
+                }
+
+                let stop = stop.min(range_end);
+                let span = highlight::span(line, position..stop, scope);
+
+                spans.push(span);
+
+                position = stop;
+            }
+        }
+
+        // The walk stops at `end`, before the terminator, so the
+        // iterator is left partially consumed. The highlighter
+        // applies its scope operations lazily, as the iterator is
+        // consumed, so the remainder must be drained: the trailing
+        // operations close the scopes of the line (a `//` comment,
+        // for instance), and, left behind, those scopes would carry
+        // over to the next line highlighted by the same highlighter.
+        scopes.for_each(|_| {});
+
+        Self { background, spans }
+    }
+}
+
+struct Palette {
+    added: Color,
+    removed: Color,
+}
+
+impl Palette {
+    fn new(theme: &Theme) -> Self {
+        let palette = theme.seed();
+
+        Self {
+            added: palette.success,
+            removed: palette.danger,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The joined text of the spans of a line.
+    fn text_of(line: &Line) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.text.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_diff_without_grammar_or_changes_renders_plain_lines() {
+        let palette = Palette::new(&Theme::CatppuccinMocha);
+
+        let diff = Diff::new("README", "a\nb", "a\nc");
+
+        let [context_line, removed_line, added_line] = &diff.lines[..] else {
+            unreachable!()
+        };
+
+        // The overall background of a line is a faded version of the
+        // line's color; context lines are never emphasized, so they are
+        // left transparent.
+        assert_eq!(context_line.background, Color::TRANSPARENT);
+        assert_eq!(
+            removed_line.background,
+            palette.removed.scale_alpha(BACKGROUND_ALPHA)
+        );
+        assert_eq!(
+            added_line.background,
+            palette.added.scale_alpha(BACKGROUND_ALPHA)
+        );
+
+        // Without a grammar for the path and without intraline
+        // changes, the lines render with plain spans.
+        for line in [context_line, removed_line, added_line] {
+            for span in &line.spans {
+                assert!(span.color.is_none());
+                assert!(span.highlight.is_none());
+            }
+        }
+
+        assert_eq!(text_of(context_line), "  a");
+        assert_eq!(text_of(removed_line), "- b");
+        assert_eq!(text_of(added_line), "+ c");
+    }
+
+    #[test]
+    fn highlights_intraline_changes() {
+        let palette = Palette::new(&Theme::CatppuccinMocha);
+
+        let diff = Diff::new("src/main.rs", "let x = 1\n", "let x = 2\n");
+
+        let [removed_line, added_line] = &diff.lines[..] else {
+            unreachable!()
+        };
+
+        assert_eq!(
+            removed_line.background,
+            palette.removed.scale_alpha(BACKGROUND_ALPHA)
+        );
+        assert_eq!(
+            added_line.background,
+            palette.added.scale_alpha(BACKGROUND_ALPHA)
+        );
+
+        // The `+`/`-` markers stay plain; the color of the line is
+        // carried by its background instead.
+        let prefix = &removed_line.spans[0];
+        assert_eq!(prefix.text.as_ref(), "- ");
+        assert!(prefix.color.is_none());
+        assert!(prefix.highlight.is_none());
+
+        // The unchanged parts of the line are syntax-highlighted, but
+        // never emphasized.
+        assert!(removed_line.spans.iter().any(|span| {
+            span.text.as_ref() == "let"
+                && span.color == Some(Theme::CatppuccinMocha.palette().primary.base.color)
+                && span.highlight.is_none()
+        }));
+
+        // The changed character groups are highlighted on top of the
+        // syntax highlighting.
+        let changes: Vec<_> = removed_line
+            .spans
+            .iter()
+            .filter(|span| span.highlight.is_some())
+            .collect();
+
+        let [change] = &changes[..] else {
+            unreachable!()
+        };
+
+        assert_eq!(change.text.as_ref(), "1");
+        assert_eq!(change.color, None);
+        assert_eq!(
+            change.highlight.map(|highlight| highlight.background),
+            Some(palette.removed.scale_alpha(HIGHLIGHT_ALPHA).into())
+        );
+
+        assert_eq!(text_of(removed_line), "- let x = 1");
+        assert_eq!(text_of(added_line), "+ let x = 2");
+
+        let changes: Vec<_> = added_line
+            .spans
+            .iter()
+            .filter(|span| span.highlight.is_some())
+            .collect();
+
+        let [change] = &changes[..] else {
+            unreachable!()
+        };
+
+        assert_eq!(change.text.as_ref(), "2");
+        assert_eq!(
+            change.highlight.map(|highlight| highlight.background),
+            Some(palette.added.scale_alpha(HIGHLIGHT_ALPHA).into())
+        );
+    }
+
+    #[test]
+    fn a_multi_line_diff_renders_a_line_per_file_line() {
+        let diff = Diff::new("a.txt", "a\nb\nc", "a\nx\ny\nz\nc");
+
+        let [context, removed, added_1, added_2, added_3, tail] = &diff.lines[..] else {
+            unreachable!()
+        };
+
+        assert_eq!(text_of(context), "  a");
+        assert_eq!(text_of(removed), "- b");
+        assert_eq!(text_of(added_1), "+ x");
+        assert_eq!(text_of(added_2), "+ y");
+        assert_eq!(text_of(added_3), "+ z");
+        assert_eq!(text_of(tail), "  c");
+
+        // The terminators are dropped from the spans entirely.
+        for line in [context, removed, added_1, added_2, added_3, tail] {
+            for span in &line.spans {
+                assert!(!span.text.contains('\n'));
+            }
+        }
+    }
+
+    #[test]
+    fn an_inserted_line_is_highlighted_against_the_new_file() {
+        // The old line is an unterminated string, which would leave the
+        // parser inside a string if the diff were highlighted in a single
+        // pass. The inserted line must instead take the state of the new
+        // file, where `1` is a number, not a string.
+        let diff = Diff::new("a.py", "x = \"", "x = 1");
+
+        let [_, added] = &diff.lines[..] else {
+            unreachable!()
+        };
+
+        let one = added
+            .spans
+            .iter()
+            .find(|span| span.text.as_ref() == "1")
+            .unwrap();
+
+        assert_eq!(one.color, None);
+    }
+
+    #[test]
+    fn a_line_is_highlighted_with_the_state_of_the_lines_before_it() {
+        // The lines in the middle of a multi-line string are only colored
+        // as string content if the parser state carries over from the
+        // line that opened the string.
+        let diff = Diff::new("a.py", "", "x = \"\"\"\nhello\nworld\n\"\"\"");
+
+        let [_, hello, world, _] = &diff.lines[..] else {
+            unreachable!()
+        };
+
+        let string = Theme::CatppuccinMocha.palette().success.base.color;
+
+        for line in [hello, world] {
+            assert!(line.spans.iter().any(|span| span.color == Some(string)));
+        }
+    }
+
+    #[test]
+    fn strips_line_terminators() {
+        // Every line renders in its own `container`, so the terminators
+        // are dropped from the spans entirely, terminated or not.
+        for (old, new) in [
+            ("foo 1", "foo 2"),
+            ("foo 1\n", "foo 2\n"),
+            ("foo 1\nbar\nbaz", "foo 2\nbar\nqux\n"),
+        ] {
+            let diff = Diff::new("README", old, new);
+
+            for line in &diff.lines {
+                for span in &line.spans {
+                    assert!(!span.text.contains('\n'));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn strips_lone_cr_terminators() {
+        // A lone `\r` terminates a line just like `\n` and `\r\n`,
+        // so it is dropped from the spans along with them.
+        let diff = Diff::new("a.txt", "foo 1\rbar\rbaz\r", "foo 2\rbar\rqux\r");
+
+        let [removed_1, added_1, context, removed_2, added_2] = &diff.lines[..] else {
+            unreachable!()
+        };
+
+        assert_eq!(text_of(removed_1), "- foo 1");
+        assert_eq!(text_of(added_1), "+ foo 2");
+        assert_eq!(text_of(context), "  bar");
+        assert_eq!(text_of(removed_2), "- baz");
+        assert_eq!(text_of(added_2), "+ qux");
+    }
+
+    #[test]
+    fn scope_boundaries_never_emit_empty_spans() {
+        // The walk syncs the scope cursor with the position cursor
+        // before cutting each span, so a cursor sitting on a scope
+        // boundary must never yield a zero-width span.
+        for (old, new) in [
+            ("let x = 1\n", "let x = 2\n"),
+            ("let x = 1; y\n", "let x = 2; y\n"),
+            ("let x = 1\r\n", "let x = 2\r\n"),
+            (
+                "fn main() {\n    let x = 1;\n}\n",
+                "fn main() {\n    let x = 2;\n}\n",
+            ),
+        ] {
+            let diff = Diff::new("src/main.rs", old, new);
+
+            for line in &diff.lines {
+                for span in &line.spans {
+                    assert!(!span.text.is_empty(), "zero-width span");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_line_without_scopes_is_rendered_plain() {
+        // The walk must not assume the highlighter scopes the whole
+        // line: without any scopes, the line renders without syntax
+        // highlighting instead of panicking.
+        let line = Line::new(
+            '-',
+            "let x = 1\n",
+            None,
+            [(false, "let x = 1\n")],
+            std::iter::empty(),
+        );
+
+        assert_eq!(text_of(&line), "- let x = 1");
+
+        for span in &line.spans {
+            assert!(span.color.is_none());
+            assert!(span.highlight.is_none());
+        }
+    }
+
+    #[test]
+    fn scopes_that_stop_short_of_the_end_leave_the_remainder_plain() {
+        let line = Line::new(
+            '+',
+            "let x = 1\n",
+            None,
+            [(false, "let x = 1\n")],
+            [(0..3, Code::Keyword)],
+        );
+
+        assert_eq!(text_of(&line), "+ let x = 1");
+
+        let keyword = Theme::CatppuccinMocha.palette().primary.base.color;
+
+        assert!(
+            line.spans
+                .iter()
+                .any(|span| { span.text.as_ref() == "let" && span.color == Some(keyword) })
+        );
+
+        assert!(
+            line.spans
+                .iter()
+                .any(|span| span.text.as_ref() == " x = 1" && span.color.is_none())
+        );
+    }
+
+    #[test]
+    fn an_empty_line_is_rendered_without_scopes() {
+        let line = Line::new(' ', "", None, std::iter::empty(), std::iter::empty());
+
+        assert_eq!(text_of(&line), "  ");
+    }
+
+    #[test]
+    fn a_scope_closed_at_line_end_does_not_carry_over() {
+        let comment = Code::Comment.highlight(&Theme::CatppuccinMocha).color;
+
+        let diff = Diff::new(
+            "src/main.rs",
+            "// a comment\nlet x = 1;\n",
+            "// a comment\nlet x = 2;\n",
+        );
+
+        let [context, removed, added] = &diff.lines[..] else {
+            unreachable!()
+        };
+
+        // The comment is highlighted, and its scope closes at the end
+        // of the line.
+        assert!(
+            context
+                .spans
+                .iter()
+                .any(|span| span.text.as_ref() == " a comment" && span.color == comment)
+        );
+
+        // The scope iterator is consumed lazily by the highlighter, and
+        // the span walk stops before the line terminator. It must be
+        // drained, or the scope that closed at the end of the comment
+        // line stays open, and the uncolored regions of the lines after
+        // it (the whitespace around the identifier) inherit its color.
+        for line in [removed, added] {
+            assert!(
+                line.spans
+                    .iter()
+                    .any(|span| span.text.as_ref() == " x " && span.color.is_none())
+            );
+        }
+    }
+}

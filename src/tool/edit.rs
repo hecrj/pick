@@ -1,21 +1,15 @@
+use crate::Diff;
 use crate::core::file;
-use crate::highlight;
 use crate::tool::Output;
 use crate::tool::call::{self, Call};
 
-use iced::border;
-use iced::highlighter;
-use iced::widget::text;
-use iced::widget::{column, container, rich_text, scrollable, span};
-use iced::{Code, Color, Element, Fill, Fit, Never, Theme};
+use iced::widget::{column, container, scrollable};
+use iced::{Element, Fill, Fit, Never};
 
 use serde::Deserialize;
-use similar::{ChangeTag, InlineChangeOptions, TextDiff};
 
 use std::borrow::Cow;
-use std::ops::Range;
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 #[derive(Deserialize)]
 #[serde(from = "Arguments")]
@@ -24,7 +18,7 @@ pub struct Edit {
     old_string: String,
     new_string: String,
     replace_all: bool,
-    diff: Vec<Line>,
+    diff: Diff,
 }
 
 #[derive(Deserialize)]
@@ -45,7 +39,7 @@ impl From<Arguments> for Edit {
             replace_all,
         }: Arguments,
     ) -> Self {
-        let diff = Line::diff(&path, &old_string, &new_string);
+        let diff = Diff::new(&path, &old_string, &new_string);
 
         Self {
             path,
@@ -63,24 +57,15 @@ impl Call for Edit {
     }
 
     fn view(&self) -> Option<Element<'_, Never>> {
-        let lines = self.diff.iter().map(|line| {
-            container(rich_text(line.spans.as_slice()).size(14))
-                .width(Fill)
-                .padding([2, 10])
-                .style(|_theme| container::Style::default().background(line.background))
-                .into()
-        });
-
         Some(
             container(
-                scrollable(column(lines).width(Fill))
+                scrollable(column(self.diff.view()).width(Fill))
                     .width(Fill)
                     .height(Fit.max(300))
                     .direction(scrollable::Direction::Vertical(
                         scrollable::Scrollbar::default().margin(10).spacing(0),
                     )),
             )
-            .width(Fill)
             .padding([10, 0])
             .style(container::dark)
             .into(),
@@ -120,7 +105,8 @@ impl Call for Edit {
 
             if occurrences > 1 && !replace_all {
                 Err(std::io::Error::other(format!(
-                    "old_string matches {occurrences} locations in {}; include more context to make it unique, or set replace_all to true",
+                    "old_string matches {occurrences} locations in {}; \
+                     include more context to make it unique, or set replace_all to true",
                     path.display()
                 )))?
             }
@@ -145,205 +131,26 @@ impl Call for Edit {
     }
 }
 
-/// The total time budget for refining intraline changes.
-const INLINE_DEADLINE: Duration = Duration::from_millis(10);
-const BACKGROUND_ALPHA: f32 = 0.10;
-const HIGHLIGHT_ALPHA: f32 = BACKGROUND_ALPHA * 2.0;
-
-/// A line of the edit diff.
-struct Line {
-    /// The overall background of the line itself.
-    background: Color,
-    /// The spans of the line, used only for the inline highlights.
-    spans: Vec<text::Span<'static>>,
-}
-
-impl Line {
-    fn diff(path: &str, old: &str, new: &str) -> Vec<Self> {
-        let palette = Self::palette(&Theme::CatppuccinMocha); // TODO: Pass `Theme` as argument
-        let diff = TextDiff::from_lines(old, new);
-        let options = InlineChangeOptions::default();
-        let deadline = Some(Instant::now() + INLINE_DEADLINE);
-
-        let settings = highlighter::Settings {
-            token: highlight::token(path),
-        };
-
-        let mut old_parser = highlighter::Parser::new(&settings);
-        let mut new_parser = highlighter::Parser::new(&settings);
-
-        diff.iter_all_inline_changes_with_options_deadline(options, deadline)
-            .map(|change| {
-                let (prefix, style) = match change.tag() {
-                    ChangeTag::Insert => ('+', Some(palette.added)),
-                    ChangeTag::Delete => ('-', Some(palette.removed)),
-                    ChangeTag::Equal => (' ', None),
-                };
-
-                let line: String = change.values().iter().map(|&(_, value)| value).collect();
-
-                let scopes = match change.tag() {
-                    ChangeTag::Insert => new_parser.parse_line(&line),
-                    ChangeTag::Delete => old_parser.parse_line(&line),
-                    ChangeTag::Equal => {
-                        // The scopes are discarded, but the iterator must be
-                        // consumed: the old highlighter's state only
-                        // advances as the line is highlighted.
-                        old_parser.parse_line(&line).for_each(|_| {});
-                        new_parser.parse_line(&line)
-                    }
-                };
-
-                Line::new(
-                    prefix,
-                    &line,
-                    style,
-                    change.values().iter().copied(),
-                    scopes,
-                )
-            })
-            .collect()
-    }
-
-    fn new<'a>(
-        prefix: char,
-        line: &str,
-        style: Option<Color>,
-        values: impl IntoIterator<Item = (bool, &'a str)>,
-        scopes: impl IntoIterator<Item = (Range<usize>, Code)>,
-    ) -> Self {
-        let background = style
-            .map(|color| color.scale_alpha(BACKGROUND_ALPHA))
-            .unwrap_or(Color::TRANSPARENT);
-
-        let mut spans = vec![span(format!("{prefix} "))];
-
-        // Every line renders in its own `container`, so the
-        // terminator, whether it is `\n`, `\r\n`, or `\r`, is
-        // dropped from the end of the line, terminated or not.
-        let mut end = line.len();
-
-        if line.ends_with('\n') {
-            end -= '\n'.len_utf8();
-
-            if line[..end].ends_with('\r') {
-                end -= '\r'.len_utf8();
-            }
-        } else if line.ends_with('\r') {
-            end -= '\r'.len_utf8();
-        }
-
-        // The scopes partition the line from zero to its end, so a
-        // single cursor walks the segments and the scopes, cutting
-        // them at `end`. If the highlighter provides no scopes, or
-        // stops short of the end of the line, the remainder is
-        // rendered without syntax highlighting.
-        let mut position = 0;
-        let mut values = values.into_iter();
-        let mut scopes = scopes.into_iter();
-        let (mut range_end, mut scope) = scopes
-            .next()
-            .map(|(range, scope)| (range.end, scope))
-            .unwrap_or((line.len(), Code::Other));
-
-        let highlight = style.map(|color| color.scale_alpha(HIGHLIGHT_ALPHA));
-
-        while let Some((emphasized, mut value)) = values.next() {
-            if let Some(highlight) = highlight
-                && emphasized
-            {
-                let mut total = value.len();
-                let mut is_over = true;
-
-                // Unify all emphasized ranges
-                for (emphasized, other) in values.by_ref() {
-                    if !emphasized {
-                        value = other;
-                        is_over = false;
-                        break;
-                    }
-
-                    total += other.len();
-                }
-
-                spans.push(
-                    span(&line[position..position + total])
-                        .background(highlight)
-                        .border(border::rounded(2))
-                        .to_static(),
-                );
-
-                position += total;
-
-                if is_over {
-                    break;
-                }
-            }
-
-            let stop = end.min(position + value.len());
-
-            while position < stop {
-                // Running out of scopes leaves the remainder of the
-                // line without syntax highlighting.
-                while range_end <= position {
-                    match scopes.next() {
-                        Some((range, new_scope)) => {
-                            range_end = range.end;
-                            scope = new_scope;
-                        }
-                        None => {
-                            range_end = line.len();
-                            scope = Code::Other;
-                        }
-                    }
-                }
-
-                let stop = stop.min(range_end);
-                let span = highlight::span(line, position..stop, scope);
-
-                spans.push(span);
-
-                position = stop;
-            }
-        }
-
-        // The walk stops at `end`, before the terminator, so the
-        // iterator is left partially consumed. The highlighter
-        // applies its scope operations lazily, as the iterator is
-        // consumed, so the remainder must be drained: the trailing
-        // operations close the scopes of the line (a `//` comment,
-        // for instance), and, left behind, those scopes would carry
-        // over to the next line highlighted by the same highlighter.
-        scopes.for_each(|_| {});
-
-        Self { background, spans }
-    }
-
-    fn palette(theme: &Theme) -> Palette {
-        let palette = theme.seed();
-
-        Palette {
-            added: palette.success,
-            removed: palette.danger,
-        }
-    }
-}
-
-struct Palette {
-    added: Color,
-    removed: Color,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The joined text of the spans of a line.
-    fn text_of(line: &Line) -> String {
-        line.spans
-            .iter()
-            .map(|span| span.text.to_string())
-            .collect()
+    use pick_test::Directory;
+
+    /// Creates the project directory of a test, seeding it with files.
+    fn project(test: &str, files: &[(&str, &str)]) -> Directory {
+        let root = Directory::create(
+            std::env::temp_dir()
+                .join(format!("pick-edit-test-{}", std::process::id()))
+                .join(test),
+        )
+        .unwrap();
+
+        for (name, contents) in files {
+            std::fs::write(root.join(name), contents).unwrap();
+        }
+
+        root
     }
 
     #[test]
@@ -355,341 +162,152 @@ mod tests {
         assert_eq!(edit.path, "README");
         assert!(!edit.replace_all);
 
-        let palette = Line::palette(&Theme::CatppuccinMocha);
-
-        let [context_line, removed_line, added_line] = &edit.diff[..] else {
-            unreachable!()
-        };
-
-        // The overall background of a line is a faded version of the
-        // line's color; context lines are never emphasized, so they are
-        // left transparent.
-        assert_eq!(context_line.background, Color::TRANSPARENT);
-        assert_eq!(
-            removed_line.background,
-            palette.removed.scale_alpha(BACKGROUND_ALPHA)
-        );
-        assert_eq!(
-            added_line.background,
-            palette.added.scale_alpha(BACKGROUND_ALPHA)
-        );
-
-        // Without a grammar for the path and without intraline
-        // changes, the lines render with plain spans.
-        for line in [context_line, removed_line, added_line] {
-            for span in &line.spans {
-                assert!(span.color.is_none());
-                assert!(span.highlight.is_none());
-            }
-        }
-
-        assert_eq!(text_of(context_line), "  a");
-        assert_eq!(text_of(removed_line), "- b");
-        assert_eq!(text_of(added_line), "+ c");
+        // The diff of the strings is cached on the tool itself; the
+        // rendering of its lines is covered in the `diff` module.
+        assert_eq!(edit.diff.lines.len(), 3);
     }
 
-    #[test]
-    fn highlights_intraline_changes() {
-        let palette = Line::palette(&Theme::CatppuccinMocha);
+    #[tokio::test]
+    async fn a_unique_match_is_replaced_in_place() {
+        let root = project("unique", &[("a.txt", "one\ntwo\n")]);
 
-        let edit: Edit = serde_json::from_str(
-            r#"{"path":"src/main.rs","old_string":"let x = 1\n","new_string":"let x = 2\n"}"#,
-        )
-        .unwrap();
-
-        let [removed_line, added_line] = &edit.diff[..] else {
-            unreachable!()
+        let edit = Edit {
+            path: "a.txt".to_owned(),
+            old_string: "one".to_owned(),
+            new_string: "uno".to_owned(),
+            replace_all: false,
+            diff: Diff::new("a.txt", "one", "uno"),
         };
+
+        let output = edit.run(&root).await.unwrap();
 
         assert_eq!(
-            removed_line.background,
-            palette.removed.scale_alpha(BACKGROUND_ALPHA)
+            output.to_string(),
+            format!("[Edited {} (1 replacement)]", root.join("a.txt").display())
         );
         assert_eq!(
-            added_line.background,
-            palette.added.scale_alpha(BACKGROUND_ALPHA)
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "uno\ntwo\n"
         );
+    }
 
-        // The `+`/`-` markers stay plain; the color of the line is
-        // carried by its background instead.
-        let prefix = &removed_line.spans[0];
-        assert_eq!(prefix.text.as_ref(), "- ");
-        assert!(prefix.color.is_none());
-        assert!(prefix.highlight.is_none());
+    #[tokio::test]
+    async fn an_ambiguous_match_fails_without_replace_all() {
+        let root = project("ambiguous", &[("a.txt", "a\nb\na\nc\n")]);
 
-        // The unchanged parts of the line are syntax-highlighted, but
-        // never emphasized.
-        assert!(removed_line.spans.iter().any(|span| {
-            span.text.as_ref() == "let"
-                && span.color == Some(Theme::CatppuccinMocha.palette().primary.base.color)
-                && span.highlight.is_none()
-        }));
-
-        // The changed character groups are highlighted on top of the
-        // syntax highlighting.
-        let changes: Vec<_> = removed_line
-            .spans
-            .iter()
-            .filter(|span| span.highlight.is_some())
-            .collect();
-
-        let [change] = &changes[..] else {
-            unreachable!()
+        let edit = Edit {
+            path: "a.txt".to_owned(),
+            old_string: "a".to_owned(),
+            new_string: "x".to_owned(),
+            replace_all: false,
+            diff: Diff::new("a.txt", "a", "x"),
         };
 
-        assert_eq!(change.text.as_ref(), "1");
-        assert_eq!(change.color, None);
+        let error = edit.run(&root).await.unwrap_err();
+
         assert_eq!(
-            change.highlight.map(|highlight| highlight.background),
-            Some(palette.removed.scale_alpha(HIGHLIGHT_ALPHA).into())
+            error.to_string(),
+            format!(
+                "io operation failed: old_string matches 2 locations in {}; \
+                 include more context to make it unique, or set replace_all to true",
+                root.join("a.txt").display()
+            )
         );
 
-        assert_eq!(text_of(removed_line), "- let x = 1");
-        assert_eq!(text_of(added_line), "+ let x = 2");
-
-        let changes: Vec<_> = added_line
-            .spans
-            .iter()
-            .filter(|span| span.highlight.is_some())
-            .collect();
-
-        let [change] = &changes[..] else {
-            unreachable!()
-        };
-
-        assert_eq!(change.text.as_ref(), "2");
         assert_eq!(
-            change.highlight.map(|highlight| highlight.background),
-            Some(palette.added.scale_alpha(HIGHLIGHT_ALPHA).into())
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "a\nb\na\nc\n"
         );
     }
 
-    #[test]
-    fn a_multi_line_diff_renders_a_line_per_file_line() {
-        let edit: Edit = serde_json::from_str(
-            r#"{"path":"a.txt","old_string":"a\nb\nc","new_string":"a\nx\ny\nz\nc"}"#,
-        )
-        .unwrap();
+    #[tokio::test]
+    async fn replace_all_replaces_every_occurrence() {
+        let root = project("replace-all", &[("a.txt", "a\nb\na\nc\na\n")]);
 
-        let [context, removed, added_1, added_2, added_3, tail] = &edit.diff[..] else {
-            unreachable!()
+        let edit = Edit {
+            path: "a.txt".to_owned(),
+            old_string: "a".to_owned(),
+            new_string: "x".to_owned(),
+            replace_all: true,
+            diff: Diff::new("a.txt", "a", "x"),
         };
 
-        assert_eq!(text_of(context), "  a");
-        assert_eq!(text_of(removed), "- b");
-        assert_eq!(text_of(added_1), "+ x");
-        assert_eq!(text_of(added_2), "+ y");
-        assert_eq!(text_of(added_3), "+ z");
-        assert_eq!(text_of(tail), "  c");
+        let output = edit.run(&root).await.unwrap();
 
-        // The terminators are dropped from the spans entirely.
-        for line in [context, removed, added_1, added_2, added_3, tail] {
-            for span in &line.spans {
-                assert!(!span.text.contains('\n'));
-            }
-        }
+        assert_eq!(
+            output.to_string(),
+            format!("[Edited {} (3 replacements)]", root.join("a.txt").display())
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "x\nb\nx\nc\nx\n"
+        );
     }
 
-    #[test]
-    fn an_inserted_line_is_highlighted_against_the_new_file() {
-        // The old line is an unterminated string, which would leave the
-        // parser inside a string if the diff were highlighted in a single
-        // pass. The inserted line must instead take the state of the new
-        // file, where `1` is a number, not a string.
-        let edit: Edit =
-            serde_json::from_str(r#"{"path":"a.py","old_string":"x = \"","new_string":"x = 1"}"#)
-                .unwrap();
+    #[tokio::test]
+    async fn a_missing_old_string_fails() {
+        let root = project("missing", &[("a.txt", "one\ntwo\n")]);
 
-        let [_, added] = &edit.diff[..] else {
-            unreachable!()
+        let edit = Edit {
+            path: "a.txt".to_owned(),
+            old_string: "three".to_owned(),
+            new_string: "x".to_owned(),
+            replace_all: false,
+            diff: Diff::new("a.txt", "three", "x"),
         };
 
-        let one = added
-            .spans
-            .iter()
-            .find(|span| span.text.as_ref() == "1")
-            .unwrap();
+        let error = edit.run(&root).await.unwrap_err();
 
-        assert_eq!(one.color, None);
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "io operation failed: old_string not found in {}",
+                root.join("a.txt").display()
+            )
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "one\ntwo\n"
+        );
     }
 
-    #[test]
-    fn a_line_is_highlighted_with_the_state_of_the_lines_before_it() {
-        // The lines in the middle of a multi-line string are only colored
-        // as string content if the parser state carries over from the
-        // line that opened the string.
-        let edit: Edit = serde_json::from_str(
-            r#"{"path":"a.py","old_string":"","new_string":"x = \"\"\"\nhello\nworld\n\"\"\""}"#,
-        )
-        .unwrap();
+    #[tokio::test]
+    async fn an_empty_old_string_fails() {
+        let root = project("empty-old", &[("a.txt", "one\n")]);
 
-        let [_, hello, world, _] = &edit.diff[..] else {
-            unreachable!()
+        let edit = Edit {
+            path: "a.txt".to_owned(),
+            old_string: String::new(),
+            new_string: "two".to_owned(),
+            replace_all: false,
+            diff: Diff::new("a.txt", "", "two"),
         };
 
-        let string = Theme::CatppuccinMocha.palette().success.base.color;
+        let error = edit.run(&root).await.unwrap_err();
 
-        for line in [hello, world] {
-            assert!(line.spans.iter().any(|span| span.color == Some(string)));
-        }
+        assert_eq!(
+            error.to_string(),
+            "io operation failed: old_string must not be empty"
+        );
     }
 
-    #[test]
-    fn strips_line_terminators() {
-        // Every line renders in its own `container`, so the terminators
-        // are dropped from the spans entirely, terminated or not.
-        for (old, new) in [
-            ("foo 1", "foo 2"),
-            ("foo 1\n", "foo 2\n"),
-            ("foo 1\nbar\nbaz", "foo 2\nbar\nqux\n"),
-        ] {
-            let lines = Line::diff("README", old, new);
+    #[tokio::test]
+    async fn an_identical_old_and_new_string_fails() {
+        let root = project("identical", &[("a.txt", "one\n")]);
 
-            for line in &lines {
-                for span in &line.spans {
-                    assert!(!span.text.contains('\n'));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn strips_lone_cr_terminators() {
-        // A lone `\r` terminates a line just like `\n` and `\r\n`,
-        // so it is dropped from the spans along with them.
-        let edit: Edit = serde_json::from_str(
-            r#"{"path":"a.txt","old_string":"foo 1\rbar\rbaz\r","new_string":"foo 2\rbar\rqux\r"}"#,
-        )
-        .unwrap();
-
-        let [removed_1, added_1, context, removed_2, added_2] = &edit.diff[..] else {
-            unreachable!()
+        let edit = Edit {
+            path: "a.txt".to_owned(),
+            old_string: "one".to_owned(),
+            new_string: "one".to_owned(),
+            replace_all: false,
+            diff: Diff::new("a.txt", "one", "one"),
         };
 
-        assert_eq!(text_of(removed_1), "- foo 1");
-        assert_eq!(text_of(added_1), "+ foo 2");
-        assert_eq!(text_of(context), "  bar");
-        assert_eq!(text_of(removed_2), "- baz");
-        assert_eq!(text_of(added_2), "+ qux");
-    }
+        let error = edit.run(&root).await.unwrap_err();
 
-    #[test]
-    fn scope_boundaries_never_emit_empty_spans() {
-        // The walk syncs the scope cursor with the position cursor
-        // before cutting each span, so a cursor sitting on a scope
-        // boundary must never yield a zero-width span.
-        for (old, new) in [
-            ("let x = 1\n", "let x = 2\n"),
-            ("let x = 1; y\n", "let x = 2; y\n"),
-            ("let x = 1\r\n", "let x = 2\r\n"),
-            (
-                "fn main() {\n    let x = 1;\n}\n",
-                "fn main() {\n    let x = 2;\n}\n",
-            ),
-        ] {
-            let edit: Edit = serde_json::from_str(&format!(
-                r#"{{"path":"src/main.rs","old_string":{},"new_string":{}}}"#,
-                serde_json::to_string(old).unwrap(),
-                serde_json::to_string(new).unwrap(),
-            ))
-            .unwrap();
-
-            for line in &edit.diff {
-                for span in &line.spans {
-                    assert!(!span.text.is_empty(), "zero-width span");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn a_line_without_scopes_is_rendered_plain() {
-        // The walk must not assume the highlighter scopes the whole
-        // line: without any scopes, the line renders without syntax
-        // highlighting instead of panicking.
-        let line = Line::new(
-            '-',
-            "let x = 1\n",
-            None,
-            [(false, "let x = 1\n")],
-            std::iter::empty(),
+        assert_eq!(
+            error.to_string(),
+            "io operation failed: old_string and new_string must be different"
         );
-
-        assert_eq!(text_of(&line), "- let x = 1");
-
-        for span in &line.spans {
-            assert!(span.color.is_none());
-            assert!(span.highlight.is_none());
-        }
-    }
-
-    #[test]
-    fn scopes_that_stop_short_of_the_end_leave_the_remainder_plain() {
-        let line = Line::new(
-            '+',
-            "let x = 1\n",
-            None,
-            [(false, "let x = 1\n")],
-            [(0..3, Code::Keyword)],
-        );
-
-        assert_eq!(text_of(&line), "+ let x = 1");
-
-        let keyword = Theme::CatppuccinMocha.palette().primary.base.color;
-
-        assert!(
-            line.spans
-                .iter()
-                .any(|span| { span.text.as_ref() == "let" && span.color == Some(keyword) })
-        );
-
-        assert!(
-            line.spans
-                .iter()
-                .any(|span| span.text.as_ref() == " x = 1" && span.color.is_none())
-        );
-    }
-
-    #[test]
-    fn an_empty_line_is_rendered_without_scopes() {
-        let line = Line::new(' ', "", None, std::iter::empty(), std::iter::empty());
-
-        assert_eq!(text_of(&line), "  ");
-    }
-
-    #[test]
-    fn a_scope_closed_at_line_end_does_not_carry_over() {
-        let comment = Code::Comment.highlight(&Theme::CatppuccinMocha).color;
-
-        let edit: Edit = serde_json::from_str(
-            r#"{"path":"src/main.rs","old_string":"// a comment\nlet x = 1;\n","new_string":"// a comment\nlet x = 2;\n"}"#,
-        )
-        .unwrap();
-
-        let [context, removed, added] = &edit.diff[..] else {
-            unreachable!()
-        };
-
-        // The comment is highlighted, and its scope closes at the end
-        // of the line.
-        assert!(
-            context
-                .spans
-                .iter()
-                .any(|span| span.text.as_ref() == " a comment" && span.color == comment)
-        );
-
-        // The scope iterator is consumed lazily by the highlighter, and
-        // the span walk stops before the line terminator. It must be
-        // drained, or the scope that closed at the end of the comment
-        // line stays open, and the uncolored regions of the lines after
-        // it (the whitespace around the identifier) inherit its color.
-        for line in [removed, added] {
-            assert!(
-                line.spans
-                    .iter()
-                    .any(|span| span.text.as_ref() == " x " && span.color.is_none())
-            );
-        }
     }
 }

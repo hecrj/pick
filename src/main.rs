@@ -1,5 +1,6 @@
 use pick_core as core;
 
+mod diff;
 mod font;
 mod highlight;
 mod item;
@@ -13,6 +14,7 @@ use crate::core::path;
 use crate::core::sandbox;
 use crate::core::session;
 use crate::core::{Project, Session};
+use crate::diff::Diff;
 use crate::font::Font;
 use crate::item::Item;
 use crate::markdown::Markdown;
