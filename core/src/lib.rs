@@ -2,6 +2,7 @@ mod output;
 mod project;
 
 pub mod file;
+pub mod git;
 pub mod path;
 pub mod sandbox;
 pub mod session;

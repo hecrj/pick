@@ -8,6 +8,7 @@ mod markdown;
 mod tool;
 mod widget;
 
+use crate::core::git;
 use crate::core::path;
 use crate::core::sandbox;
 use crate::core::session;
@@ -24,7 +25,7 @@ use iced::time;
 use iced::widget::operation;
 use iced::widget::{
     bottom, center, center_x, column, container, row, scrollable, sensor, space, stack, text,
-    text_editor,
+    text_editor, toggler,
 };
 use iced::{Center, Element, Fill, Fit, Size, Subscription, Task, Theme};
 
@@ -42,6 +43,9 @@ const LIVE: &str = "--we-doin-it-live";
 /// The flag that resumes a session instead of starting a fresh
 /// one: the newest, or the one at the path that follows it.
 const RESUME: &str = "--resume";
+
+/// The maximum width of the content area
+const MAX_CONTENT_WIDTH: u32 = 770;
 
 fn main() -> Result<(), iced::Error> {
     tracing_subscriber::fmt::init();
@@ -97,7 +101,7 @@ fn main() -> Result<(), iced::Error> {
     };
 
     iced::application(
-        move || Pick::new(prompt.as_deref(), &session),
+        move || Pick::new(&project, prompt.as_deref(), &session),
         Pick::update,
         Pick::view,
     )
@@ -109,7 +113,14 @@ fn main() -> Result<(), iced::Error> {
 }
 
 struct Pick {
+    project: Project,
+    home: Option<PathBuf>,
+    session: session::File,
+    repository: Repository,
+    server: String,
+    tools: HashMap<&'static str, Tool>,
     connection: Connection,
+    tasks: HashMap<Work, task::Handle>,
     models: BTreeMap<model::Id, reason::Model>,
     model: Option<model::Id>,
     messages: Vec<Item>,
@@ -118,12 +129,17 @@ struct Pick {
     input_height: f32,
     content_width: f32,
     snap_to_bottom: bool,
-    tasks: HashMap<Work, task::Handle>,
-    tools: HashMap<&'static str, Tool>,
-    project: PathBuf,
-    session: session::File,
-    home: Option<PathBuf>,
-    server: String,
+    mode: Mode,
+}
+
+struct Repository {
+    status: Option<git::Status>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Mode {
+    Chat,
+    Review,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -160,15 +176,25 @@ enum Message {
     ToolFinished(reason::tool::Id, Result<tool::Output, reason::Error>),
     Item(usize, item::Message),
     Abort,
+    ToggleReviewMode(bool),
+    RepositoryChanged(git::Result<git::Status>),
 }
 
 impl Pick {
-    fn new(prompt: Option<&str>, session: &session::File) -> (Self, Task<Message>) {
-        let project = env::current_dir().unwrap_or_default();
-        let session = session.clone();
-
+    fn new(
+        project: &Project,
+        prompt: Option<&str>,
+        session: &session::File,
+    ) -> (Self, Task<Message>) {
         let mut pick = Self {
+            project: project.clone(),
+            home: env::home_dir(),
+            session: session.clone(),
+            repository: Repository { status: None },
+            server: "http://127.0.0.1:9931".to_owned(),
+            tools: Tool::builtins(),
             connection: Connection::Disconnected,
+            tasks: HashMap::new(),
             models: BTreeMap::new(),
             model: None,
             messages: Vec::new(),
@@ -179,20 +205,14 @@ impl Pick {
             input_height: 0.0,
             content_width: 0.0,
             snap_to_bottom: true,
-            tasks: HashMap::new(),
-            project: project.clone(),
-            session: session.clone(),
-            home: env::home_dir(),
-            server: "http://127.0.0.1:9931".to_owned(),
-            tools: Tool::builtins(),
+            mode: Mode::Chat,
         };
 
-        let load = Task::perform(
-            async move { Session::load(&session).await },
-            Message::SessionLoaded,
-        );
+        let boot = {
+            let load = Task::perform(Session::load(session), Message::SessionLoaded);
 
-        let boot = Task::batch([pick.connect(), load]);
+            Task::batch([pick.connect(), load])
+        };
 
         (
             pick,
@@ -202,6 +222,7 @@ impl Pick {
                 } else {
                     boot
                 },
+                Task::perform(git::Status::current(project), Message::RepositoryChanged),
                 operation::focus("input"),
             ]),
         )
@@ -535,6 +556,16 @@ impl Pick {
 
                 Task::none()
             }
+            Message::ToggleReviewMode(enable) => {
+                self.mode = if enable { Mode::Review } else { Mode::Chat };
+
+                Task::none()
+            }
+            Message::RepositoryChanged(status) => {
+                self.repository.status = status.ok();
+
+                Task::none()
+            }
         }
     }
 
@@ -620,7 +651,7 @@ impl Pick {
 
         let (run, status) = match &state {
             Ok(state) => {
-                let run = state.run(&self.project);
+                let run = state.run(self.project.as_ref());
 
                 let (run, handle) = Task::sip(
                     run,
@@ -791,8 +822,24 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
     }
 
     fn view(&self) -> Element<'_, Message> {
-        const MAX_WIDTH: u32 = 770;
+        match self.mode {
+            Mode::Chat => self.chat(),
+            Mode::Review => self.review(),
+        }
+    }
 
+    fn review(&self) -> Element<'_, Message> {
+        column![
+            scrollable(center_x("Review mode!").width(Fit.max(MAX_CONTENT_WIDTH))).spacing(10),
+            container(self.status_bar()).width(Fit.max(MAX_CONTENT_WIDTH))
+        ]
+        .width(Fill)
+        .padding(10)
+        .align_x(Center)
+        .into()
+    }
+
+    fn chat(&self) -> Element<'_, Message> {
         let conversation: Element<'_, Message> = if self.messages.is_empty() {
             sensor(center(
                 text("Ready when you are.").size(font::TITLE).center(),
@@ -810,7 +857,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                             .map(|(i, item)| item.map(Message::Item.with(i))),
                     )
                     .spacing(20)
-                    .width(Fit.max(MAX_WIDTH))
+                    .width(Fit.max(MAX_CONTENT_WIDTH))
                     .padding(padding::bottom(self.input_height + 20.0)),
                 ))
                 .on_resize(|size| {
@@ -854,75 +901,16 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                 text_editor::Binding::from_key_press(key_press)
             });
 
-        let status = {
-            let project = path::tildify(&self.project, self.home.as_deref());
-
-            let server = {
-                let timings = self.timings();
-
-                let info = timings.map(|timings| {
-                    row![
-                        (timings.prompt.token > time::Duration::ZERO).then(|| {
-                            text!(
-                                "{tokens_per_second:0.2}↑",
-                                tokens_per_second = 1.0 / timings.prompt.token.as_secs_f64(),
-                            )
-                            .style(text::secondary)
-                            .size(font::SMALL)
-                        }),
-                        (timings.predicted.token > time::Duration::ZERO).then(|| {
-                            text!(
-                                "↓{tokens_per_second:0.2}",
-                                tokens_per_second = 1.0 / timings.predicted.token.as_secs_f64(),
-                            )
-                            .style(text::success)
-                            .size(font::SMALL)
-                        })
-                    ]
-                    .spacing(10)
-                });
-
-                let models = if let Some(model) = self.model.as_ref() {
-                    text(model.as_str())
-                } else {
-                    text("No models found!")
-                }
-                .size(font::SMALL)
-                .width(Fit.max(200))
-                .wrapping(text::Wrapping::None)
-                .ellipsis(text::Ellipsis::End)
-                .style(|theme: &Theme| {
-                    let palette = theme.seed();
-
-                    text::Style {
-                        color: match &self.connection {
-                            Connection::Disconnected => Some(palette.danger),
-                            Connection::Connecting => Some(palette.warning),
-                            Connection::Connected(_) => None,
-                        },
-                    }
-                });
-
-                let context = widget::context_led(self.context_size(), timings);
-
-                row![info, models, context].spacing(10).align_y(Center)
-            };
-
-            row![
-                text(project.display().to_string()).size(font::SMALL),
-                space::horizontal(),
-                server,
-            ]
-            .align_y(Center)
-            .spacing(10)
-        };
-
         container(stack![
             conversation,
             bottom(
                 center_x(
-                    sensor(column![input, status].spacing(10).width(Fit.max(MAX_WIDTH)))
-                        .on_resize(Message::InputResized)
+                    sensor(
+                        column![input, self.status_bar()]
+                            .spacing(10)
+                            .width(Fit.max(MAX_CONTENT_WIDTH))
+                    )
+                    .on_resize(Message::InputResized)
                 )
                 .style(|theme| container::Style {
                     background: Some(theme.seed().background.into()),
@@ -932,6 +920,107 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
             )
         ])
         .padding(10)
+        .into()
+    }
+
+    fn status_bar(&self) -> Element<'_, Message> {
+        let project = path::tildify(&self.project, self.home.as_deref());
+
+        let repository = self.repository.status.as_ref().map(|status| {
+            let branch = match &status.branch {
+                git::Branch::Unborn(name) | git::Branch::Named(name) => text!("@ {name}"),
+                git::Branch::Detached(_sha) => text("@ detached HEAD").style(text::warning),
+            }
+            .size(font::SMALL);
+
+            let changes = row![
+                text!("+{}", status.additions)
+                    .size(font::SMALL)
+                    .style(text::success),
+                text!("-{}", status.deletions)
+                    .size(font::SMALL)
+                    .style(text::danger),
+                (!status.untracked.is_empty()).then(|| {
+                    text!("({})", status.untracked.len())
+                        .size(font::TINY)
+                        .font(Font {
+                            style: font::Style::Italic,
+                            ..Font::MONOSPACE
+                        })
+                }),
+            ]
+            .spacing(5)
+            .align_y(Center);
+
+            row![branch, changes].spacing(10)
+        });
+
+        let review = toggler(matches!(self.mode, Mode::Review))
+            .label("Review")
+            .text_size(font::SMALL)
+            .size(font::SMALL * 0.8)
+            .on_toggle(Message::ToggleReviewMode);
+
+        let server = {
+            let timings = self.timings();
+
+            let info = timings.map(|timings| {
+                row![
+                    (timings.prompt.token > time::Duration::ZERO).then(|| {
+                        text!(
+                            "{tokens_per_second:0.2}↑",
+                            tokens_per_second = 1.0 / timings.prompt.token.as_secs_f64(),
+                        )
+                        .style(text::secondary)
+                        .size(font::SMALL)
+                    }),
+                    (timings.predicted.token > time::Duration::ZERO).then(|| {
+                        text!(
+                            "↓{tokens_per_second:0.2}",
+                            tokens_per_second = 1.0 / timings.predicted.token.as_secs_f64(),
+                        )
+                        .style(text::success)
+                        .size(font::SMALL)
+                    })
+                ]
+                .spacing(10)
+            });
+
+            let models = if let Some(model) = self.model.as_ref() {
+                text(model.as_str())
+            } else {
+                text("No models found!")
+            }
+            .size(font::SMALL)
+            .width(Fit.max(200))
+            .wrapping(text::Wrapping::None)
+            .ellipsis(text::Ellipsis::End)
+            .style(|theme: &Theme| {
+                let palette = theme.seed();
+
+                text::Style {
+                    color: match &self.connection {
+                        Connection::Disconnected => Some(palette.danger),
+                        Connection::Connecting => Some(palette.warning),
+                        Connection::Connected(_) => None,
+                    },
+                }
+            });
+
+            let context = widget::context_led(self.context_size(), timings);
+
+            row![info, models, context].spacing(10).align_y(Center)
+        };
+
+        row![
+            text(project.display().to_string()).size(font::SMALL),
+            repository,
+            review,
+            space::horizontal(),
+            server,
+        ]
+        .align_y(Center)
+        .spacing(10)
         .into()
     }
 

@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
-pub fn tildify(path: &Path, home: Option<&Path>) -> PathBuf {
+pub fn tildify(path: impl AsRef<Path>, home: Option<&Path>) -> PathBuf {
+    let path = path.as_ref();
+
     let Some(home) = home else {
         return path.to_path_buf();
     };

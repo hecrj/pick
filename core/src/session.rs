@@ -100,7 +100,7 @@ pub struct Session {
 impl Session {
     /// Loads the session in `session`, or an empty session when the
     /// file does not exist yet: the first `append` creates it.
-    pub async fn load(session: &File) -> Result<Self, reason::Error> {
+    pub fn load(session: &File) -> impl Future<Output = Result<Self, reason::Error>> + 'static {
         use std::io::BufRead;
 
         let path = session.path().to_path_buf();
@@ -111,44 +111,48 @@ impl Session {
             items: Vec::new(),
         };
 
-        tokio::task::spawn_blocking(move || {
-            let file = match std::fs::File::open(&path) {
-                Ok(file) => file,
-                // A missing file is no error: the session does not
-                // exist yet.
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(session),
-                Err(error) => return Err(error.into()),
-            };
+        async move {
+            tokio::task::spawn_blocking(move || {
+                let file = match std::fs::File::open(&path) {
+                    Ok(file) => file,
+                    // A missing file is no error: the session does not
+                    // exist yet.
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        return Ok(session);
+                    }
+                    Err(error) => return Err(error.into()),
+                };
 
-            let mut reader = std::io::BufReader::new(file);
-            let mut line = String::new();
+                let mut reader = std::io::BufReader::new(file);
+                let mut line = String::new();
 
-            while reader.read_line(&mut line)? > 0 {
-                if line.trim().is_empty() {
-                    continue;
+                while reader.read_line(&mut line)? > 0 {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+
+                    let frame = decoder::run(serde_json::from_str, Frame::decode, &line)
+                        .map_err(std::io::Error::from)?;
+
+                    match frame.event {
+                        Event::Created(version) => {
+                            session.version = version;
+                            session.started_at = frame.at;
+                        }
+                        Event::ItemAdded(item) => {
+                            session.items.push(item);
+                        }
+                    }
+
+                    line.clear();
                 }
 
-                let frame = decoder::run(serde_json::from_str, Frame::decode, &line)
-                    .map_err(std::io::Error::from)?;
+                session.abort_interrupted_tools();
 
-                match frame.event {
-                    Event::Created(version) => {
-                        session.version = version;
-                        session.started_at = frame.at;
-                    }
-                    Event::ItemAdded(item) => {
-                        session.items.push(item);
-                    }
-                }
-
-                line.clear();
-            }
-
-            session.abort_interrupted_tools();
-
-            Ok(session)
-        })
-        .await?
+                Ok(session)
+            })
+            .await?
+        }
     }
 
     pub async fn append(
