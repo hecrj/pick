@@ -48,7 +48,7 @@ decoder.git = "https://github.com/hecrj/decoder.git"
 decoder.rev = "c2b759faa6cc49a4fd25271c7149028e6ff395c3"
 
 iced.git = "https://github.com/iced-rs/iced.git"
-iced.rev = "ba94c520a1862988139928157da9c7dedf4e1b52"
+iced.rev = "c756d97e98c67b0be78ffdf6f71b577a44fe394c"
 
 reason.git = "https://github.com/hecrj/reason.git"
 reason.rev = "d3d81d9de38a7fbd9bb95a9fe0111d4e295006d4"
