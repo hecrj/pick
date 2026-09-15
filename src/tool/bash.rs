@@ -2,7 +2,7 @@ use crate::tool::Output;
 use crate::tool::call::{self, Call};
 
 use iced::widget::{container, text};
-use iced::{Element, Fill, Never};
+use iced::{Element, Never};
 
 use serde::Deserialize;
 use tokio::io::AsyncBufReadExt;
@@ -16,13 +16,7 @@ pub struct Bash {
 
 impl Call for Bash {
     fn view(&self) -> Option<Element<'_, Never>> {
-        Some(
-            container(text(&self.command).size(14))
-                .width(Fill)
-                .padding(10)
-                .style(container::dark)
-                .into(),
-        )
+        Some(container(text(&self.command).size(14)).padding(10).into())
     }
 
     fn run(&self, project: &Path) -> call::Run {

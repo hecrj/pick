@@ -12,9 +12,13 @@ use write::Write;
 pub use crate::core::Output;
 pub use call::Call;
 
+use iced::{Color, color};
 use serde::de::DeserializeOwned;
 
 use std::collections::HashMap;
+
+/// The background of the tool view
+pub const BACKGROUND: Color = color!(0x111);
 
 pub struct Tool {
     name: &'static str,

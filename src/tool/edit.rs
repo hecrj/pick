@@ -1,7 +1,7 @@
 use crate::Diff;
 use crate::core::file;
-use crate::tool::Output;
 use crate::tool::call::{self, Call};
+use crate::tool::{BACKGROUND, Output};
 
 use iced::widget::{column, container, scrollable};
 use iced::{Element, Fill, Fit, Never};
@@ -39,7 +39,7 @@ impl From<Arguments> for Edit {
             replace_all,
         }: Arguments,
     ) -> Self {
-        let diff = Diff::new(&path, &old_string, &new_string);
+        let diff = Diff::new(&path, &old_string, &new_string, BACKGROUND);
 
         Self {
             path,
@@ -59,7 +59,7 @@ impl Call for Edit {
     fn view(&self) -> Option<Element<'_, Never>> {
         Some(
             container(
-                scrollable(column(self.diff.view()).width(Fill))
+                scrollable(column(self.diff.view(None)).width(Fill))
                     .width(Fill)
                     .height(Fit.max(300))
                     .direction(scrollable::Direction::Vertical(
@@ -67,7 +67,6 @@ impl Call for Edit {
                     )),
             )
             .padding([10, 0])
-            .style(container::dark)
             .into(),
         )
     }
@@ -176,7 +175,7 @@ mod tests {
             old_string: "one".to_owned(),
             new_string: "uno".to_owned(),
             replace_all: false,
-            diff: Diff::new("a.txt", "one", "uno"),
+            diff: Diff::new("a.txt", "one", "uno", BACKGROUND),
         };
 
         let output = edit.run(&root).await.unwrap();
@@ -200,7 +199,7 @@ mod tests {
             old_string: "a".to_owned(),
             new_string: "x".to_owned(),
             replace_all: false,
-            diff: Diff::new("a.txt", "a", "x"),
+            diff: Diff::new("a.txt", "a", "x", BACKGROUND),
         };
 
         let error = edit.run(&root).await.unwrap_err();
@@ -229,7 +228,7 @@ mod tests {
             old_string: "a".to_owned(),
             new_string: "x".to_owned(),
             replace_all: true,
-            diff: Diff::new("a.txt", "a", "x"),
+            diff: Diff::new("a.txt", "a", "x", BACKGROUND),
         };
 
         let output = edit.run(&root).await.unwrap();
@@ -253,7 +252,7 @@ mod tests {
             old_string: "three".to_owned(),
             new_string: "x".to_owned(),
             replace_all: false,
-            diff: Diff::new("a.txt", "three", "x"),
+            diff: Diff::new("a.txt", "three", "x", BACKGROUND),
         };
 
         let error = edit.run(&root).await.unwrap_err();
@@ -280,7 +279,7 @@ mod tests {
             old_string: String::new(),
             new_string: "two".to_owned(),
             replace_all: false,
-            diff: Diff::new("a.txt", "", "two"),
+            diff: Diff::new("a.txt", "", "two", BACKGROUND),
         };
 
         let error = edit.run(&root).await.unwrap_err();
@@ -300,7 +299,7 @@ mod tests {
             old_string: "one".to_owned(),
             new_string: "one".to_owned(),
             replace_all: false,
-            diff: Diff::new("a.txt", "one", "one"),
+            diff: Diff::new("a.txt", "one", "one", BACKGROUND),
         };
 
         let error = edit.run(&root).await.unwrap_err();

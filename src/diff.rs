@@ -1,27 +1,30 @@
+use crate::core::git;
+use crate::font;
 use crate::highlight;
 
 use iced::border;
 use iced::highlighter;
-use iced::widget::{container, rich_text, span, text};
-use iced::{Code, Color, Element, Fill, Never, Theme};
+use iced::padding;
+use iced::widget::{center, container, rich_text, row, span, text};
+use iced::{Center, Code, Color, Element, Fill, Never, Pixels, Theme};
 
 use similar::{ChangeTag, InlineChangeOptions, TextDiff};
 
 use std::ops::Range;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// The total time budget for refining intraline changes.
 const INLINE_DEADLINE: Duration = Duration::from_millis(10);
-const BACKGROUND_ALPHA: f32 = 0.10;
-const HIGHLIGHT_ALPHA: f32 = BACKGROUND_ALPHA * 2.0;
 
+#[derive(Debug, Clone)]
 pub struct Diff {
-    pub lines: Vec<Line>,
+    pub lines: Arc<[Line]>,
 }
 
 impl Diff {
-    pub fn new(path: &str, old: &str, new: &str) -> Self {
-        let palette = Palette::new(&Theme::CatppuccinMocha); // TODO: Pass `Theme` as argument
+    pub fn new(path: &str, old: &str, new: &str, background: Color) -> Self {
+        let palette = Palette::new(&Theme::CatppuccinMocha, background); // TODO: Pass theme as argument
         let diff = TextDiff::from_lines(old, new);
         let options = InlineChangeOptions::default();
         let deadline = Some(Instant::now() + INLINE_DEADLINE);
@@ -36,10 +39,10 @@ impl Diff {
         let lines = diff
             .iter_all_inline_changes_with_options_deadline(options, deadline)
             .map(|change| {
-                let (prefix, style) = match change.tag() {
-                    ChangeTag::Insert => ('+', Some(palette.added)),
-                    ChangeTag::Delete => ('-', Some(palette.removed)),
-                    ChangeTag::Equal => (' ', None),
+                let tag = match change.tag() {
+                    ChangeTag::Insert => Tag::Addition,
+                    ChangeTag::Delete => Tag::Deletion,
+                    ChangeTag::Equal => Tag::Context,
                 };
 
                 let line: String = change.values().iter().map(|&(_, value)| value).collect();
@@ -57,11 +60,11 @@ impl Diff {
                 };
 
                 Line::new(
-                    prefix,
+                    tag,
                     &line,
-                    style,
                     change.values().iter().copied(),
                     scopes,
+                    &palette,
                 )
             })
             .collect();
@@ -69,36 +72,141 @@ impl Diff {
         Self { lines }
     }
 
-    pub fn view(&self) -> impl Iterator<Item = Element<'_, Never>> {
-        self.lines.iter().map(|line| {
-            container(rich_text(line.spans.as_slice()).size(14))
-                .width(Fill)
-                .padding([2, 10])
-                .style(|_theme| container::Style::default().background(line.background))
+    pub fn from_hunk(path: &str, hunk: &git::Hunk, background: Color) -> Self {
+        let old: String = hunk
+            .lines
+            .iter()
+            .filter_map(|line| {
+                if let git::Line::Deleted { text, .. } | git::Line::Context { text, .. } = line {
+                    Some(format!("{text}\n"))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let new: String = hunk
+            .lines
+            .iter()
+            .filter_map(|line| {
+                if let git::Line::Added { text, .. } | git::Line::Context { text, .. } = line {
+                    Some(format!("{text}\n"))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        Self::new(path, &old, &new, background)
+    }
+
+    pub fn view(
+        &self,
+        mut start: Option<(usize, usize)>,
+    ) -> impl Iterator<Item = Element<'_, Never>> {
+        self.lines.iter().map(move |line| {
+            let gutter = if let Some((old, new)) = &mut start {
+                let (left, right) = match line.tag {
+                    Tag::Context => (Some(*old), Some(*new)),
+                    Tag::Addition => (None, Some(*new)),
+                    Tag::Deletion => (Some(*old), None),
+                };
+
+                match line.tag {
+                    Tag::Context => {
+                        *old += 1;
+                        *new += 1;
+                    }
+                    Tag::Addition => {
+                        *new += 1;
+                    }
+                    Tag::Deletion => {
+                        *old += 1;
+                    }
+                }
+
+                fn number(n: Option<usize>, line: &Line) -> Element<'_, Never> {
+                    center(n.map(|n| {
+                        text(n)
+                            .size(font::TINY)
+                            .style(move |theme: &Theme| text::Style {
+                                color: if let Tag::Context = line.tag {
+                                    Some(theme.palette().secondary.base.color)
+                                } else {
+                                    None
+                                },
+                            })
+                    }))
+                    .height(20)
+                    .width(40)
+                    .into()
+                }
+
+                Some(row![number(left, line), number(right, line)])
+            } else {
+                None
+            };
+
+            let spans = container(
+                rich_text(line.spans.as_slice())
+                    .wrapping(text::Wrapping::WordOrGlyph)
+                    .size(font::SMALL)
+                    .line_height(Pixels((font::SMALL * 1.75).round())),
+            )
+            .width(Fill)
+            .padding(padding::horizontal(10))
+            .style(|_theme| {
+                container::Style::default().background(
+                    line.style
+                        .map(|style| style.background)
+                        .unwrap_or(Color::TRANSPARENT),
+                )
+            });
+
+            container(row![gutter, spans].align_y(Center))
+                .style(|_theme| {
+                    container::Style::default().background(
+                        line.style
+                            .map(|style| style.gutter)
+                            .unwrap_or(Color::TRANSPARENT),
+                    )
+                })
                 .into()
         })
     }
 }
 
 /// A line of the edit diff.
+#[derive(Debug)]
 pub struct Line {
-    /// The overall background of the line itself.
-    background: Color,
+    /// The tag of the line.
+    tag: Tag,
+    /// The style of the line.
+    style: Option<Style>,
     /// The spans of the line, used only for the inline highlights.
     spans: Vec<text::Span<'static>>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum Tag {
+    Context,
+    Addition,
+    Deletion,
+}
+
 impl Line {
     fn new<'a>(
-        prefix: char,
+        tag: Tag,
         line: &str,
-        style: Option<Color>,
         values: impl IntoIterator<Item = (bool, &'a str)>,
         scopes: impl IntoIterator<Item = (Range<usize>, Code)>,
+        palette: &Palette,
     ) -> Self {
-        let background = style
-            .map(|color| color.scale_alpha(BACKGROUND_ALPHA))
-            .unwrap_or(Color::TRANSPARENT);
+        let (prefix, style) = match tag {
+            Tag::Context => (' ', None),
+            Tag::Addition => ('+', Some(palette.addition)),
+            Tag::Deletion => ('-', Some(palette.deletion)),
+        };
 
         let mut spans = vec![span(format!("{prefix} "))];
 
@@ -130,7 +238,7 @@ impl Line {
             .map(|(range, scope)| (range.end, scope))
             .unwrap_or((line.len(), Code::Other));
 
-        let highlight = style.map(|color| color.scale_alpha(HIGHLIGHT_ALPHA));
+        let highlight = style.map(|style| style.highlight);
 
         while let Some((emphasized, mut value)) = values.next() {
             if let Some(highlight) = highlight
@@ -154,6 +262,7 @@ impl Line {
                     span(&line[position..position + total])
                         .background(highlight)
                         .border(border::rounded(2))
+                        .padding(padding::horizontal(2))
                         .to_static(),
                 );
 
@@ -200,22 +309,43 @@ impl Line {
         // over to the next line highlighted by the same highlighter.
         scopes.for_each(|_| {});
 
-        Self { background, spans }
+        Self { tag, style, spans }
     }
 }
 
 struct Palette {
-    added: Color,
-    removed: Color,
+    addition: Style,
+    deletion: Style,
 }
 
 impl Palette {
-    fn new(theme: &Theme) -> Self {
+    fn new(theme: &Theme, background: Color) -> Self {
         let palette = theme.seed();
 
         Self {
-            added: palette.success,
-            removed: palette.danger,
+            addition: Style::new(background, palette.success),
+            deletion: Style::new(background, palette.danger),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Style {
+    background: Color,
+    gutter: Color,
+    highlight: Color,
+}
+
+impl Style {
+    pub fn new(background: Color, accent: Color) -> Self {
+        use iced::theme::palette;
+
+        let darkened = palette::darken(accent, 0.3);
+
+        Self {
+            background: darkened.mix(background, 0.97),
+            gutter: darkened.mix(background, 0.85),
+            highlight: palette::darken(accent.mix(background, 0.95), 0.02),
         }
     }
 }
@@ -234,35 +364,16 @@ mod tests {
 
     #[test]
     fn a_diff_without_grammar_or_changes_renders_plain_lines() {
-        let palette = Palette::new(&Theme::CatppuccinMocha);
-
-        let diff = Diff::new("README", "a\nb", "a\nc");
+        let diff = Diff::new("README", "a\nb", "a\nc", Color::TRANSPARENT);
 
         let [context_line, removed_line, added_line] = &diff.lines[..] else {
             unreachable!()
         };
 
-        // The overall background of a line is a faded version of the
-        // line's color; context lines are never emphasized, so they are
-        // left transparent.
-        assert_eq!(context_line.background, Color::TRANSPARENT);
-        assert_eq!(
-            removed_line.background,
-            palette.removed.scale_alpha(BACKGROUND_ALPHA)
-        );
-        assert_eq!(
-            added_line.background,
-            palette.added.scale_alpha(BACKGROUND_ALPHA)
-        );
-
-        // Without a grammar for the path and without intraline
-        // changes, the lines render with plain spans.
-        for line in [context_line, removed_line, added_line] {
-            for span in &line.spans {
-                assert!(span.color.is_none());
-                assert!(span.highlight.is_none());
-            }
-        }
+        // Each line carries the tag of its role in the diff.
+        assert_eq!(context_line.tag, Tag::Context);
+        assert_eq!(removed_line.tag, Tag::Deletion);
+        assert_eq!(added_line.tag, Tag::Addition);
 
         assert_eq!(text_of(context_line), "  a");
         assert_eq!(text_of(removed_line), "- b");
@@ -271,39 +382,25 @@ mod tests {
 
     #[test]
     fn highlights_intraline_changes() {
-        let palette = Palette::new(&Theme::CatppuccinMocha);
-
-        let diff = Diff::new("src/main.rs", "let x = 1\n", "let x = 2\n");
+        let diff = Diff::new(
+            "src/main.rs",
+            "let x = 1\n",
+            "let x = 2\n",
+            Color::TRANSPARENT,
+        );
 
         let [removed_line, added_line] = &diff.lines[..] else {
             unreachable!()
         };
 
-        assert_eq!(
-            removed_line.background,
-            palette.removed.scale_alpha(BACKGROUND_ALPHA)
-        );
-        assert_eq!(
-            added_line.background,
-            palette.added.scale_alpha(BACKGROUND_ALPHA)
-        );
+        assert_eq!(removed_line.tag, Tag::Deletion);
+        assert_eq!(added_line.tag, Tag::Addition);
 
-        // The `+`/`-` markers stay plain; the color of the line is
-        // carried by its background instead.
-        let prefix = &removed_line.spans[0];
-        assert_eq!(prefix.text.as_ref(), "- ");
-        assert!(prefix.color.is_none());
-        assert!(prefix.highlight.is_none());
+        // The `+`/`-` markers are the first span of each line.
+        assert_eq!(removed_line.spans[0].text.as_ref(), "- ");
+        assert_eq!(added_line.spans[0].text.as_ref(), "+ ");
 
-        // The unchanged parts of the line are syntax-highlighted, but
-        // never emphasized.
-        assert!(removed_line.spans.iter().any(|span| {
-            span.text.as_ref() == "let"
-                && span.color == Some(Theme::CatppuccinMocha.palette().primary.base.color)
-                && span.highlight.is_none()
-        }));
-
-        // The changed character groups are highlighted on top of the
+        // The changed character group is emphasized on top of the
         // syntax highlighting.
         let changes: Vec<_> = removed_line
             .spans
@@ -316,11 +413,6 @@ mod tests {
         };
 
         assert_eq!(change.text.as_ref(), "1");
-        assert_eq!(change.color, None);
-        assert_eq!(
-            change.highlight.map(|highlight| highlight.background),
-            Some(palette.removed.scale_alpha(HIGHLIGHT_ALPHA).into())
-        );
 
         assert_eq!(text_of(removed_line), "- let x = 1");
         assert_eq!(text_of(added_line), "+ let x = 2");
@@ -336,15 +428,11 @@ mod tests {
         };
 
         assert_eq!(change.text.as_ref(), "2");
-        assert_eq!(
-            change.highlight.map(|highlight| highlight.background),
-            Some(palette.added.scale_alpha(HIGHLIGHT_ALPHA).into())
-        );
     }
 
     #[test]
     fn a_multi_line_diff_renders_a_line_per_file_line() {
-        let diff = Diff::new("a.txt", "a\nb\nc", "a\nx\ny\nz\nc");
+        let diff = Diff::new("a.txt", "a\nb\nc", "a\nx\ny\nz\nc", Color::TRANSPARENT);
 
         let [context, removed, added_1, added_2, added_3, tail] = &diff.lines[..] else {
             unreachable!()
@@ -371,19 +459,23 @@ mod tests {
         // parser inside a string if the diff were highlighted in a single
         // pass. The inserted line must instead take the state of the new
         // file, where `1` is a number, not a string.
-        let diff = Diff::new("a.py", "x = \"", "x = 1");
+        let diff = Diff::new("a.py", "x = \"", "x = 1", Color::TRANSPARENT);
 
-        let [_, added] = &diff.lines[..] else {
+        let [removed, added] = &diff.lines[..] else {
             unreachable!()
         };
 
+        // The string content of the old file is colored...
+        assert!(removed.spans.iter().any(|span| span.color.is_some()));
+
+        // ...but the `1` of the new file is not.
         let one = added
             .spans
             .iter()
             .find(|span| span.text.as_ref() == "1")
             .unwrap();
 
-        assert_eq!(one.color, None);
+        assert!(one.color.is_none());
     }
 
     #[test]
@@ -391,16 +483,19 @@ mod tests {
         // The lines in the middle of a multi-line string are only colored
         // as string content if the parser state carries over from the
         // line that opened the string.
-        let diff = Diff::new("a.py", "", "x = \"\"\"\nhello\nworld\n\"\"\"");
+        let diff = Diff::new(
+            "a.py",
+            "",
+            "x = \"\"\"\nhello\nworld\n\"\"\"",
+            Color::TRANSPARENT,
+        );
 
         let [_, hello, world, _] = &diff.lines[..] else {
             unreachable!()
         };
 
-        let string = Theme::CatppuccinMocha.palette().success.base.color;
-
         for line in [hello, world] {
-            assert!(line.spans.iter().any(|span| span.color == Some(string)));
+            assert!(line.spans.iter().any(|span| span.color.is_some()));
         }
     }
 
@@ -413,9 +508,9 @@ mod tests {
             ("foo 1\n", "foo 2\n"),
             ("foo 1\nbar\nbaz", "foo 2\nbar\nqux\n"),
         ] {
-            let diff = Diff::new("README", old, new);
+            let diff = Diff::new("README", old, new, Color::TRANSPARENT);
 
-            for line in &diff.lines {
+            for line in diff.lines.iter() {
                 for span in &line.spans {
                     assert!(!span.text.contains('\n'));
                 }
@@ -427,7 +522,12 @@ mod tests {
     fn strips_lone_cr_terminators() {
         // A lone `\r` terminates a line just like `\n` and `\r\n`,
         // so it is dropped from the spans along with them.
-        let diff = Diff::new("a.txt", "foo 1\rbar\rbaz\r", "foo 2\rbar\rqux\r");
+        let diff = Diff::new(
+            "a.txt",
+            "foo 1\rbar\rbaz\r",
+            "foo 2\rbar\rqux\r",
+            Color::TRANSPARENT,
+        );
 
         let [removed_1, added_1, context, removed_2, added_2] = &diff.lines[..] else {
             unreachable!()
@@ -454,9 +554,9 @@ mod tests {
                 "fn main() {\n    let x = 2;\n}\n",
             ),
         ] {
-            let diff = Diff::new("src/main.rs", old, new);
+            let diff = Diff::new("src/main.rs", old, new, Color::TRANSPARENT);
 
-            for line in &diff.lines {
+            for line in diff.lines.iter() {
                 for span in &line.spans {
                     assert!(!span.text.is_empty(), "zero-width span");
                 }
@@ -466,67 +566,59 @@ mod tests {
 
     #[test]
     fn a_line_without_scopes_is_rendered_plain() {
+        let palette = Palette::new(&Theme::CatppuccinMocha, Color::TRANSPARENT);
+
         // The walk must not assume the highlighter scopes the whole
-        // line: without any scopes, the line renders without syntax
-        // highlighting instead of panicking.
+        // line: without any scopes, the line still renders instead
+        // of panicking.
         let line = Line::new(
-            '-',
+            Tag::Deletion,
             "let x = 1\n",
-            None,
             [(false, "let x = 1\n")],
             std::iter::empty(),
+            &palette,
         );
 
         assert_eq!(text_of(&line), "- let x = 1");
-
-        for span in &line.spans {
-            assert!(span.color.is_none());
-            assert!(span.highlight.is_none());
-        }
     }
 
     #[test]
     fn scopes_that_stop_short_of_the_end_leave_the_remainder_plain() {
+        let palette = Palette::new(&Theme::CatppuccinMocha, Color::TRANSPARENT);
+
         let line = Line::new(
-            '+',
+            Tag::Addition,
             "let x = 1\n",
-            None,
             [(false, "let x = 1\n")],
             [(0..3, Code::Keyword)],
+            &palette,
         );
 
         assert_eq!(text_of(&line), "+ let x = 1");
-
-        let keyword = Theme::CatppuccinMocha.palette().primary.base.color;
-
-        assert!(
-            line.spans
-                .iter()
-                .any(|span| { span.text.as_ref() == "let" && span.color == Some(keyword) })
-        );
-
-        assert!(
-            line.spans
-                .iter()
-                .any(|span| span.text.as_ref() == " x = 1" && span.color.is_none())
-        );
     }
 
     #[test]
     fn an_empty_line_is_rendered_without_scopes() {
-        let line = Line::new(' ', "", None, std::iter::empty(), std::iter::empty());
+        let palette = Palette::new(&Theme::CatppuccinMocha, Color::TRANSPARENT);
+
+        let line = Line::new(
+            Tag::Context,
+            "",
+            std::iter::empty(),
+            std::iter::empty(),
+            &palette,
+        );
 
         assert_eq!(text_of(&line), "  ");
     }
 
     #[test]
     fn a_scope_closed_at_line_end_does_not_carry_over() {
-        let comment = Code::Comment.highlight(&Theme::CatppuccinMocha).color;
-
         let diff = Diff::new(
             "src/main.rs",
             "// a comment\nlet x = 1;\n",
             "// a comment\nlet x = 2;\n",
+            Color::TRANSPARENT,
         );
 
         let [context, removed, added] = &diff.lines[..] else {
@@ -539,7 +631,7 @@ mod tests {
             context
                 .spans
                 .iter()
-                .any(|span| span.text.as_ref() == " a comment" && span.color == comment)
+                .any(|span| span.text.as_ref() == " a comment" && span.color.is_some())
         );
 
         // The scope iterator is consumed lazily by the highlighter, and

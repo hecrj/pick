@@ -177,8 +177,15 @@ impl Item {
                     row![label, title].spacing(10).align_y(Center)
                 };
 
-                let arguments = match &tool.state {
-                    Ok(state) => state.view().map(|state| state.map(never)),
+                let arguments: Option<Element<'_, Message>> = match &tool.state {
+                    Ok(state) => state.view().map(|state| {
+                        container(state.map(never))
+                            .width(Fill)
+                            .style(|_theme| {
+                                container::Style::default().background(tool::BACKGROUND)
+                            })
+                            .into()
+                    }),
                     Err(error) => Some(
                         text!("{error}")
                             .size(font::SMALL)
@@ -299,11 +306,18 @@ impl Item {
                         })
                 });
 
-                container(column![header, arguments, output].spacing(10))
-                    .width(Fill)
-                    .padding(10)
-                    .style(container::bordered_box)
-                    .into()
+                container(
+                    column![
+                        header.padding(padding::all(10).bottom(0)),
+                        arguments,
+                        output.map(|output| container(output).padding(padding::all(10).top(0)))
+                    ]
+                    .spacing(10),
+                )
+                .width(Fill)
+                .padding(1)
+                .style(container::bordered_box)
+                .into()
             }
             Item::Compaction(compaction) => {
                 let notice = center_x(text(if compaction.is_finished {

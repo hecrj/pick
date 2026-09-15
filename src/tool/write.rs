@@ -4,7 +4,7 @@ use crate::tool::Output;
 use crate::tool::call::{self, Call};
 
 use iced::highlighter;
-use iced::widget::{column, container, rich_text, span, text};
+use iced::widget::{column, rich_text, span, text};
 use iced::{Element, Fill, Never};
 
 use serde::Deserialize;
@@ -72,11 +72,7 @@ impl Call for Write {
                 })
                 .chain(notice.into_iter().map(Element::from));
 
-            container(column(lines).width(Fill))
-                .width(Fill)
-                .padding(10)
-                .style(container::dark)
-                .into()
+            column(lines).width(Fill).into()
         })
     }
 

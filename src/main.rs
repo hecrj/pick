@@ -27,10 +27,10 @@ use iced::task;
 use iced::time;
 use iced::widget::operation;
 use iced::widget::{
-    bottom, button, center, center_x, column, container, row, scrollable, sensor, space, stack,
-    text, text_editor,
+    bottom, button, center, center_x, column, container, row, rule, scrollable, sensor, space,
+    stack, text, text_editor,
 };
-use iced::{Background, Center, Element, Fill, Fit, Size, Subscription, Task, Theme};
+use iced::{Background, Center, Element, Fill, Fit, Size, Subscription, Task, Theme, never};
 
 use function::Binary;
 use reason::Reason;
@@ -39,6 +39,7 @@ use reason::model;
 use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// The flag that runs the app without the bubblewrap sandbox.
 const LIVE: &str = "--we-doin-it-live";
@@ -138,7 +139,19 @@ struct Pick {
 #[derive(Default)]
 struct Repository {
     status: Option<git::Status>,
-    diff: git::Diff,
+    files: Vec<File>,
+}
+
+#[derive(Debug, Clone)]
+struct File {
+    raw: git::File,
+    hunks: Arc<[Hunk]>,
+}
+
+#[derive(Debug, Clone)]
+struct Hunk {
+    raw: git::Hunk,
+    diff: Diff,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -183,7 +196,7 @@ enum Message {
     Abort,
     ToggleReviewMode(bool),
     RepositoryChanged(git::Result<git::Status>),
-    RepositoryDiffed(git::Result<git::Diff>),
+    RepositoryDiffed(git::Result<Vec<File>>),
 }
 
 impl Pick {
@@ -220,6 +233,8 @@ impl Pick {
             Task::batch([pick.connect(), load])
         };
 
+        let status = pick.status();
+
         (
             pick,
             Task::batch([
@@ -228,44 +243,10 @@ impl Pick {
                 } else {
                     boot
                 },
-                Task::perform(git::Status::current(project), Message::RepositoryChanged),
+                status,
                 operation::focus("input"),
             ]),
         )
-    }
-
-    fn connect(&mut self) -> Task<Message> {
-        self.connection = Connection::Connecting;
-
-        Task::perform(Reason::connect(&self.server), Message::Connected)
-    }
-
-    fn list_models(&self) -> Task<Message> {
-        let Connection::Connected(reason) = self.connection.clone() else {
-            return Task::none();
-        };
-
-        Task::perform(
-            async move { reason.list_models().await },
-            Message::ModelsListed,
-        )
-    }
-
-    fn update_models(&mut self, models: Vec<reason::Model>) -> Task<Message> {
-        self.models = models
-            .into_iter()
-            .map(|model| (model.id.clone(), model))
-            .collect();
-
-        if self
-            .model
-            .as_ref()
-            .is_none_or(|model| !self.models.contains_key(model))
-        {
-            self.model = self.models.keys().next().cloned();
-        }
-
-        Task::none()
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -524,7 +505,7 @@ impl Pick {
                 };
 
                 if self.tasks.is_empty() {
-                    self.work()
+                    Task::batch([self.work(), self.status()])
                 } else {
                     Task::none()
                 }
@@ -562,27 +543,23 @@ impl Pick {
 
                 Task::none()
             }
-            Message::ToggleReviewMode(enable) => {
-                self.mode = if enable { Mode::Review } else { Mode::Chat };
+            Message::ToggleReviewMode(true) => {
+                self.mode = Mode::Review;
 
-                if let Some(status) = &self.repository.status
-                    && enable
-                {
-                    Task::perform(
-                        git::Diff::current(&self.project, status),
-                        Message::RepositoryDiffed,
-                    )
-                } else {
-                    Task::none()
-                }
+                self.diff()
+            }
+            Message::ToggleReviewMode(false) => {
+                self.mode = Mode::Chat;
+
+                operation::snap_to_end("scroll")
             }
             Message::RepositoryChanged(status) => {
                 self.repository.status = status.ok();
 
                 Task::none()
             }
-            Message::RepositoryDiffed(Ok(diff)) => {
-                self.repository.diff = diff;
+            Message::RepositoryDiffed(Ok(files)) => {
+                self.repository.files = files;
 
                 Task::none()
             }
@@ -594,30 +571,45 @@ impl Pick {
         }
     }
 
-    fn abort(&mut self) {
-        self.tasks.clear();
+    fn connect(&mut self) -> Task<Message> {
+        self.connection = Connection::Connecting;
 
-        for message in &mut self.messages {
-            if let Item::Tool(tool) = message
-                && matches!(tool.status, item::Status::Running { .. })
-            {
-                tool.status = item::Status::Aborted;
-            }
+        Task::perform(Reason::connect(&self.server), Message::Connected)
+    }
+
+    fn list_models(&self) -> Task<Message> {
+        let Connection::Connected(reason) = self.connection.clone() else {
+            return Task::none();
+        };
+
+        Task::perform(
+            async move { reason.list_models().await },
+            Message::ModelsListed,
+        )
+    }
+
+    fn update_models(&mut self, models: Vec<reason::Model>) -> Task<Message> {
+        self.models = models
+            .into_iter()
+            .map(|model| (model.id.clone(), model))
+            .collect();
+
+        if self
+            .model
+            .as_ref()
+            .is_none_or(|model| !self.models.contains_key(model))
+        {
+            self.model = self.models.keys().next().cloned();
         }
 
-        let index = self.messages.iter().rposition(|message| {
-            matches!(
-                message,
-                Item::Compaction(item::Compaction {
-                    is_finished: false,
-                    ..
-                })
-            )
-        });
+        Task::none()
+    }
 
-        if let Some(index) = index {
-            self.messages.remove(index);
-        }
+    fn status(&self) -> Task<Message> {
+        Task::perform(
+            git::Status::current(&self.project),
+            Message::RepositoryChanged,
+        )
     }
 
     fn work(&mut self) -> Task<Message> {
@@ -817,6 +809,32 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
         Some(reply)
     }
 
+    fn abort(&mut self) {
+        self.tasks.clear();
+
+        for message in &mut self.messages {
+            if let Item::Tool(tool) = message
+                && matches!(tool.status, item::Status::Running { .. })
+            {
+                tool.status = item::Status::Aborted;
+            }
+        }
+
+        let index = self.messages.iter().rposition(|message| {
+            matches!(
+                message,
+                Item::Compaction(item::Compaction {
+                    is_finished: false,
+                    ..
+                })
+            )
+        });
+
+        if let Some(index) = index {
+            self.messages.remove(index);
+        }
+    }
+
     fn save(&self) -> Task<Message> {
         let new_events: Vec<_> = self
             .messages
@@ -850,6 +868,64 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
         )
     }
 
+    fn diff(&self) -> Task<Message> {
+        let Some(status) = &self.repository.status else {
+            return Task::none();
+        };
+
+        let project = self.project.clone();
+        let status = status.clone();
+
+        Task::perform(
+            async move {
+                let diff = git::Diff::current(&project, &status).await?;
+
+                let tasks: Vec<Vec<_>> = diff
+                    .files
+                    .iter()
+                    .map(|file| {
+                        file.hunks
+                            .iter()
+                            .map(|hunk| {
+                                let path = file.path.to_owned();
+                                let hunk = hunk.clone();
+
+                                tokio::task::spawn_blocking(move || {
+                                    Diff::from_hunk(
+                                        &path,
+                                        &hunk,
+                                        Theme::CatppuccinMocha.seed().background, // TODO: Dynamic theme
+                                    )
+                                })
+                            })
+                            .collect()
+                    })
+                    .collect();
+
+                let mut files = Vec::with_capacity(diff.files.len());
+
+                for (file, tasks) in diff.files.iter().zip(tasks) {
+                    let mut hunks = Vec::new();
+
+                    for (hunk, task) in file.hunks.iter().zip(tasks) {
+                        hunks.push(Hunk {
+                            raw: hunk.clone(),
+                            diff: task.await?,
+                        });
+                    }
+
+                    files.push(File {
+                        raw: file.clone(),
+                        hunks: Arc::from(hunks),
+                    });
+                }
+
+                Ok(files)
+            },
+            Message::RepositoryDiffed,
+        )
+    }
+
     fn view(&self) -> Element<'_, Message> {
         match self.mode {
             Mode::Chat => self.chat(),
@@ -859,14 +935,55 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
 
     fn review(&self) -> Element<'_, Message> {
         column![
-            scrollable(center_x("Review mode!").width(Fit.max(MAX_CONTENT_WIDTH)))
-                .height(Fill)
-                .spacing(10),
-            container(self.status_bar()).width(Fit.max(MAX_CONTENT_WIDTH))
+            scrollable(center_x(
+                column(self.repository.files.iter().map(|file| {
+                    let header = container(
+                        row![
+                            text(&file.raw.path).size(font::SMALL).width(Fill),
+                            text!("+{}", file.raw.insertions)
+                                .style(text::success)
+                                .size(font::SMALL),
+                            text!("-{}", file.raw.deletions)
+                                .style(text::danger)
+                                .size(font::SMALL),
+                        ]
+                        .spacing(10)
+                        .align_y(Center),
+                    )
+                    .padding(10);
+
+                    let hunks = column(file.hunks.iter().map(|hunk| {
+                        Element::from(column(
+                            hunk.diff
+                                .view(Some((hunk.raw.old.start, hunk.raw.new.start))),
+                        ))
+                        .map(never)
+                    }))
+                    .spacing(10);
+
+                    container(column![
+                        header,
+                        rule::horizontal(1).style(rule::weak),
+                        hunks,
+                    ])
+                    .style(|theme| container::Style {
+                        border: border::rounded(5)
+                            .width(1)
+                            .color(theme.palette().background.weak.color),
+                        ..container::Style::default()
+                    })
+                    .padding(1)
+                    .into()
+                }))
+                .spacing(10)
+            ))
+            .width(Fill)
+            .height(Fill)
+            .spacing(10),
+            self.status_bar(),
         ]
-        .width(Fill)
+        .spacing(10)
         .padding(10)
-        .align_x(Center)
         .into()
     }
 
@@ -984,7 +1101,10 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
             .align_y(Center);
 
             let review = button(changes)
-                .on_press(Message::ToggleReviewMode(true))
+                .on_press(Message::ToggleReviewMode(!matches!(
+                    self.mode,
+                    Mode::Review
+                )))
                 .padding([0, 2])
                 .style(|theme, status| {
                     let palette = theme.palette();
