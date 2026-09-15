@@ -18,16 +18,17 @@ use crate::item::Item;
 use crate::markdown::Markdown;
 use crate::tool::Tool;
 
+use iced::border;
 use iced::keyboard;
 use iced::padding;
 use iced::task;
 use iced::time;
 use iced::widget::operation;
 use iced::widget::{
-    bottom, center, center_x, column, container, row, scrollable, sensor, space, stack, text,
-    text_editor, toggler,
+    bottom, button, center, center_x, column, container, row, scrollable, sensor, space, stack,
+    text, text_editor,
 };
-use iced::{Center, Element, Fill, Fit, Size, Subscription, Task, Theme};
+use iced::{Background, Center, Element, Fill, Fit, Size, Subscription, Task, Theme};
 
 use function::Binary;
 use reason::Reason;
@@ -132,8 +133,10 @@ struct Pick {
     mode: Mode,
 }
 
+#[derive(Default)]
 struct Repository {
     status: Option<git::Status>,
+    diff: git::Diff,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -178,6 +181,7 @@ enum Message {
     Abort,
     ToggleReviewMode(bool),
     RepositoryChanged(git::Result<git::Status>),
+    RepositoryDiffed(git::Result<git::Diff>),
 }
 
 impl Pick {
@@ -190,7 +194,7 @@ impl Pick {
             project: project.clone(),
             home: env::home_dir(),
             session: session.clone(),
-            repository: Repository { status: None },
+            repository: Repository::default(),
             server: "http://127.0.0.1:9931".to_owned(),
             tools: Tool::builtins(),
             connection: Connection::Disconnected,
@@ -559,10 +563,29 @@ impl Pick {
             Message::ToggleReviewMode(enable) => {
                 self.mode = if enable { Mode::Review } else { Mode::Chat };
 
-                Task::none()
+                if let Some(status) = &self.repository.status
+                    && enable
+                {
+                    Task::perform(
+                        git::Diff::current(&self.project, status),
+                        Message::RepositoryDiffed,
+                    )
+                } else {
+                    Task::none()
+                }
             }
             Message::RepositoryChanged(status) => {
                 self.repository.status = status.ok();
+
+                Task::none()
+            }
+            Message::RepositoryDiffed(Ok(diff)) => {
+                self.repository.diff = diff;
+
+                Task::none()
+            }
+            Message::RepositoryDiffed(Err(error)) => {
+                log::error!("{error}");
 
                 Task::none()
             }
@@ -808,6 +831,10 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
             .map(session::Event::ItemAdded)
             .collect();
 
+        if new_events.is_empty() {
+            return Task::none();
+        }
+
         let session = self.session.clone();
         let new_last_saved = self.last_saved + new_events.len();
 
@@ -830,7 +857,9 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
 
     fn review(&self) -> Element<'_, Message> {
         column![
-            scrollable(center_x("Review mode!").width(Fit.max(MAX_CONTENT_WIDTH))).spacing(10),
+            scrollable(center_x("Review mode!").width(Fit.max(MAX_CONTENT_WIDTH)))
+                .height(Fill)
+                .spacing(10),
             container(self.status_bar()).width(Fit.max(MAX_CONTENT_WIDTH))
         ]
         .width(Fill)
@@ -952,14 +981,28 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
             .spacing(5)
             .align_y(Center);
 
-            row![branch, changes].spacing(10)
-        });
+            let review = button(changes)
+                .on_press(Message::ToggleReviewMode(true))
+                .padding([0, 2])
+                .style(|theme, status| {
+                    let palette = theme.palette();
 
-        let review = toggler(matches!(self.mode, Mode::Review))
-            .label("Review")
-            .text_size(font::SMALL)
-            .size(font::SMALL * 0.8)
-            .on_toggle(Message::ToggleReviewMode);
+                    let color = match status {
+                        button::Status::Active => None,
+                        button::Status::Hovered => Some(palette.background.weaker.color),
+                        button::Status::Pressed => Some(palette.background.strong.color),
+                        button::Status::Disabled => None,
+                    };
+
+                    button::Style {
+                        background: color.map(Background::from),
+                        border: border::rounded(2),
+                        ..button::Style::default()
+                    }
+                });
+
+            row![branch, review].spacing(8)
+        });
 
         let server = {
             let timings = self.timings();
@@ -1015,7 +1058,6 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
         row![
             text(project.display().to_string()).size(font::SMALL),
             repository,
-            review,
             space::horizontal(),
             server,
         ]
