@@ -21,16 +21,17 @@ use crate::markdown::Markdown;
 use crate::tool::Tool;
 
 use iced::border;
+use iced::gradient;
 use iced::keyboard;
 use iced::padding;
 use iced::task;
 use iced::time;
 use iced::widget::operation;
 use iced::widget::{
-    bottom, button, center, center_x, column, container, row, rule, scrollable, sensor, space,
-    stack, text, text_editor,
+    button, center, center_x, column, container, row, scrollable, space, sticky, text, text_editor,
 };
-use iced::{Background, Center, Element, Fill, Fit, Size, Subscription, Task, Theme, never};
+use iced::{Background, Center, Color, Element, Fill, Fit, Subscription, Task, Theme, never};
+use iced_palace::widget::typewriter;
 
 use function::Binary;
 use reason::Reason;
@@ -130,10 +131,9 @@ struct Pick {
     messages: Vec<Item>,
     last_saved: usize,
     input: text_editor::Content,
-    input_height: f32,
-    content_width: f32,
     snap_to_bottom: bool,
     mode: Mode,
+    heartbeats: usize,
 }
 
 #[derive(Default)]
@@ -182,8 +182,6 @@ enum Message {
     SessionLoaded(Result<Session, reason::Error>),
     SessionSaved(Result<usize, reason::Error>),
     InputChanged(text_editor::Action),
-    InputResized(Size),
-    ContentResized(Size),
     SnapToBottom(bool),
     Send,
     ReplyProgressed(reason::Event),
@@ -221,10 +219,9 @@ impl Pick {
             input: prompt
                 .map(text_editor::Content::with_text)
                 .unwrap_or_default(),
-            input_height: 0.0,
-            content_width: 0.0,
             snap_to_bottom: true,
             mode: Mode::Chat,
+            heartbeats: 0,
         };
 
         let boot = {
@@ -244,7 +241,6 @@ impl Pick {
                     boot
                 },
                 status,
-                operation::focus("input"),
             ]),
         )
     }
@@ -256,6 +252,8 @@ impl Pick {
                 self.update_models(models)
             }
             Message::Heartbeat => {
+                self.heartbeats += 1;
+
                 let reconnect = match &self.connection {
                     Connection::Disconnected => self.connect(),
                     Connection::Connected(_) => self.list_models(),
@@ -274,7 +272,7 @@ impl Pick {
 
                 self.last_saved = self.messages.len();
 
-                operation::snap_to_end("scroll")
+                Task::batch([operation::snap_to_end("scroll"), operation::focus("input")])
             }
             Message::SessionSaved(Ok(last_saved)) => {
                 self.last_saved = last_saved;
@@ -283,16 +281,6 @@ impl Pick {
             }
             Message::InputChanged(action) => {
                 self.input.perform(action);
-
-                Task::none()
-            }
-            Message::InputResized(size) => {
-                self.input_height = size.height;
-
-                Task::none()
-            }
-            Message::ContentResized(size) => {
-                self.content_width = size.width;
 
                 Task::none()
             }
@@ -934,8 +922,8 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
     }
 
     fn review(&self) -> Element<'_, Message> {
-        column![
-            scrollable(center_x(
+        container(
+            scrollable(column![
                 column(self.repository.files.iter().map(|file| {
                     let header = container(
                         row![
@@ -962,69 +950,54 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                     .spacing(10);
 
                     container(column![
-                        header,
-                        rule::horizontal(1).style(rule::weak),
-                        hunks,
+                        sticky(
+                            container(
+                                container(header)
+                                    .style(|theme| {
+                                        container::Style::default()
+                                            .background(theme.palette().background.weakest.color)
+                                            .border(
+                                                border::rounded(border::top(5))
+                                                    .width(1)
+                                                    .color(theme.palette().background.weak.color),
+                                            )
+                                    })
+                                    .padding(1)
+                            )
+                            .padding(padding::top(10))
+                            .style(|theme| container::Style::default()
+                                .background(theme.seed().background))
+                        ),
+                        container(hunks).padding(1),
                     ])
                     .style(|theme| container::Style {
-                        border: border::rounded(5)
+                        border: border::rounded(border::bottom(5))
                             .width(1)
                             .color(theme.palette().background.weak.color),
                         ..container::Style::default()
                     })
-                    .padding(1)
                     .into()
                 }))
-                .spacing(10)
-            ))
+                .spacing(10),
+                space::vertical(),
+                sticky(container(self.status_bar()).padding(10).style(|theme| {
+                    container::Style::default().background(
+                        gradient::Linear::new(0)
+                            .add_stop(0.7, theme.seed().background)
+                            .add_stop(1.0, Color::TRANSPARENT),
+                    )
+                })),
+            ])
             .width(Fill)
             .height(Fill)
-            .spacing(10),
-            self.status_bar(),
-        ]
-        .spacing(10)
-        .padding(10)
+            .spacing(10)
+            .padding(10),
+        )
+        .padding([0, 10])
         .into()
     }
 
     fn chat(&self) -> Element<'_, Message> {
-        let conversation: Element<'_, Message> = if self.messages.is_empty() {
-            sensor(center(
-                text("Ready when you are.").size(font::TITLE).center(),
-            ))
-            .on_resize(Message::ContentResized)
-            .into()
-        } else {
-            scrollable(
-                sensor(center_x(
-                    column(
-                        self.messages
-                            .iter()
-                            .map(Item::view)
-                            .enumerate()
-                            .map(|(i, item)| item.map(Message::Item.with(i))),
-                    )
-                    .spacing(20)
-                    .width(Fit.max(MAX_CONTENT_WIDTH))
-                    .padding(padding::bottom(self.input_height + 20.0)),
-                ))
-                .on_resize(|size| {
-                    (size.width != self.content_width).then_some(Message::ContentResized(size))
-                }),
-            )
-            .id("scroll")
-            .width(Fill)
-            .height(Fill)
-            .on_scroll(|viewport| {
-                let snap_to_bottom = widget::snaps(viewport);
-
-                (self.snap_to_bottom != snap_to_bottom)
-                    .then_some(Message::SnapToBottom(snap_to_bottom))
-            })
-            .spacing(20)
-            .into()
-        };
-
         let input = text_editor(&self.input)
             .id("input")
             .height(Fit.max(600))
@@ -1049,26 +1022,74 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                 text_editor::Binding::from_key_press(key_press)
             });
 
-        container(stack![
-            conversation,
-            bottom(
-                center_x(
-                    sensor(
-                        column![input, self.status_bar()]
-                            .spacing(10)
-                            .width(Fit.max(MAX_CONTENT_WIDTH))
-                    )
-                    .on_resize(Message::InputResized)
+        let footer = container(column![input, self.status_bar()].spacing(10))
+            .style(|theme| {
+                container::Style::default().background(
+                    gradient::Linear::new(0)
+                        .add_stop(0.2, theme.seed().background)
+                        .add_stop(0.8, theme.seed().background.scale_alpha(0.7))
+                        .add_stop(1.0, Color::TRANSPARENT),
                 )
-                .style(|theme| container::Style {
-                    background: Some(theme.seed().background.into()),
-                    ..container::transparent(theme)
-                })
-                .width(self.content_width)
+            })
+            .padding(padding::top(20).bottom(10));
+
+        if self.messages.is_empty() {
+            const TITLES: &[&str] = &[
+                "Ready when you are.",
+                "What are we building?",
+                "Just say the word.",
+            ];
+
+            center_x(
+                center(
+                    column![
+                        typewriter(TITLES[(self.heartbeats / 6) % TITLES.len()])
+                            .size(font::TITLE)
+                            .font(Font {
+                                weight: font::Weight::Bold,
+                                ..Font::MONOSPACE
+                            }),
+                        footer
+                    ]
+                    .align_x(Center),
+                )
+                .width(Fit.max(MAX_CONTENT_WIDTH as f32 * 0.7)),
             )
-        ])
-        .padding(10)
-        .into()
+            .padding([0, 10])
+            .into()
+        } else {
+            container(
+                scrollable(center_x(
+                    column![
+                        column(
+                            self.messages
+                                .iter()
+                                .map(Item::view)
+                                .enumerate()
+                                .map(|(i, item)| item.map(Message::Item.with(i))),
+                        )
+                        .spacing(20)
+                        .padding(padding::top(10)),
+                        space::vertical(),
+                        sticky(footer),
+                    ]
+                    .width(Fit.max(MAX_CONTENT_WIDTH)),
+                ))
+                .id("scroll")
+                .width(Fill)
+                .height(Fill)
+                .on_scroll(|viewport| {
+                    let snap_to_bottom = widget::snaps(viewport);
+
+                    (self.snap_to_bottom != snap_to_bottom)
+                        .then_some(Message::SnapToBottom(snap_to_bottom))
+                })
+                .spacing(20)
+                .padding(10),
+            )
+            .padding([0, 10])
+            .into()
+        }
     }
 
     fn status_bar(&self) -> Element<'_, Message> {
@@ -1119,6 +1140,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                     button::Style {
                         background: color.map(Background::from),
                         border: border::rounded(2),
+                        text_color: palette.background.base.text,
                         ..button::Style::default()
                     }
                 });
