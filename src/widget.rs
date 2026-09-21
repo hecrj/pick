@@ -1,19 +1,39 @@
 use crate::font;
 use crate::locale;
 
+use iced::widget::operation;
 use iced::widget::{container, scrollable, text};
 use iced::{Element, Theme};
 
-pub fn snaps(viewport: scrollable::Viewport) -> bool {
-    const MAX_DISTANCE: f32 = 20.0;
+pub fn snap<Message>(
+    animation: operation::Animation,
+    scroll: scrollable::Scroll,
+) -> scrollable::Action<Message> {
+    const MAX_DISTANCE: f32 = 60.0;
 
-    let offset = viewport.absolute_offset();
-    let bounds = viewport.bounds();
-    let content_bounds = viewport.content_bounds();
+    let Some(origin) = scroll.origin else {
+        return scrollable::Action::ScrollTo(
+            scroll.viewport.end().into(),
+            operation::Animation::Instant,
+        );
+    };
 
-    let distance_to_bottom = (content_bounds.height - bounds.height - offset.y).max(0.0);
+    if matches!(
+        scroll.source,
+        scrollable::Source::Scrollbar | scrollable::Source::AutoScroll
+    ) {
+        return scrollable::Action::None;
+    }
 
-    distance_to_bottom <= MAX_DISTANCE
+    let destination = scroll.destination();
+
+    if origin.slide(destination).distance_to_end().y > MAX_DISTANCE
+        || destination.absolute_offset().y + 1.0 < scroll.viewport.absolute_offset().y
+    {
+        return scrollable::Action::None;
+    }
+
+    scrollable::Action::ScrollTo(scroll.viewport.end().into(), animation)
 }
 
 pub fn context_led<'a, Message: 'a>(

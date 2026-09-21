@@ -9,10 +9,13 @@ use crate::widget;
 use iced::border;
 use iced::padding;
 use iced::time;
+use iced::widget::operation;
 use iced::widget::{
     center_x, column, container, progress_bar, right, row, scrollable, stack, text,
 };
 use iced::{Center, Element, Fill, Fit, Font, Pixels, Task, Theme, never};
+
+use function::Binary;
 
 pub enum Item {
     User(Markdown),
@@ -23,7 +26,6 @@ pub enum Item {
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    ToolLogSnapped(bool),
     LinkClicked(markdown::Uri),
 }
 
@@ -40,21 +42,12 @@ impl Item {
                 id: tool.call.id.clone(),
                 content: tool.status.content().unwrap_or_default(),
             }),
-            Item::Compaction { .. } => None?,
+            Item::Compaction { .. } => return None,
         })
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::ToolLogSnapped(snap_to_bottom) => {
-                let Item::Tool(tool) = self else {
-                    return Task::none();
-                };
-
-                tool.snap_to_bottom = snap_to_bottom;
-
-                Task::none()
-            }
             Message::LinkClicked(uri) => {
                 // TODO
                 log::debug!("{uri}");
@@ -122,7 +115,7 @@ impl Item {
                             .width(Fill)
                             .height(Fit.max(MAX_HEIGHT))
                             .spacing(10)
-                            .anchor_bottom(),
+                            .on_scroll(widget::snap.with(operation::Animation::Instant)),
                             header,
                         ])
                         .style(|theme| container::Style {
@@ -210,12 +203,7 @@ impl Item {
                         .id(tool.call.id.as_str().to_owned())
                         .width(Fill)
                         .height(Fit.max(MAX_TOOL_LOG_HEIGHT))
-                        .on_scroll(|viewport| {
-                            let snap_to_bottom = widget::snaps(viewport);
-
-                            (tool.snap_to_bottom != snap_to_bottom)
-                                .then_some(Message::ToolLogSnapped(snap_to_bottom))
-                        })
+                        .on_scroll(widget::snap.with(operation::Animation::Auto))
                         .spacing(10)
                         .into(),
                     ),
@@ -349,7 +337,6 @@ pub struct ToolRun {
     pub call: reason::tool::Call,
     pub state: Result<Box<dyn tool::Call>, reason::Error>,
     pub status: Status,
-    pub snap_to_bottom: bool,
 }
 
 #[derive(Debug)]

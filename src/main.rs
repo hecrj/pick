@@ -28,7 +28,7 @@ use iced::task;
 use iced::time;
 use iced::widget::operation;
 use iced::widget::{
-    button, center, center_x, column, container, row, scrollable, space, sticky, text, text_editor,
+    button, center, column, container, row, scrollable, space, sticky, text, text_editor,
 };
 use iced::{Background, Center, Color, Element, Fill, Fit, Subscription, Task, Theme, never};
 use iced_palace::widget::typewriter;
@@ -131,7 +131,6 @@ struct Pick {
     messages: Vec<Item>,
     last_saved: usize,
     input: text_editor::Content,
-    snap_to_bottom: bool,
     mode: Mode,
     heartbeats: usize,
 }
@@ -182,7 +181,6 @@ enum Message {
     SessionLoaded(Result<Session, reason::Error>),
     SessionSaved(Result<usize, reason::Error>),
     InputChanged(text_editor::Action),
-    SnapToBottom(bool),
     Send,
     ReplyProgressed(reason::Event),
     ReplyReceived(Result<reason::Reply, reason::Error>),
@@ -219,7 +217,6 @@ impl Pick {
             input: prompt
                 .map(text_editor::Content::with_text)
                 .unwrap_or_default(),
-            snap_to_bottom: true,
             mode: Mode::Chat,
             heartbeats: 0,
         };
@@ -272,7 +269,7 @@ impl Pick {
 
                 self.last_saved = self.messages.len();
 
-                Task::batch([operation::snap_to_end("scroll"), operation::focus("input")])
+                operation::focus("input")
             }
             Message::SessionSaved(Ok(last_saved)) => {
                 self.last_saved = last_saved;
@@ -281,11 +278,6 @@ impl Pick {
             }
             Message::InputChanged(action) => {
                 self.input.perform(action);
-
-                Task::none()
-            }
-            Message::SnapToBottom(snap_to_bottom) => {
-                self.snap_to_bottom = snap_to_bottom;
 
                 Task::none()
             }
@@ -307,7 +299,10 @@ impl Pick {
                         .chain(self.work())
                 };
 
-                Task::batch([work, operation::snap_to_end("scroll")])
+                Task::batch([
+                    work,
+                    operation::snap_to_end("scroll", operation::Animation::Auto),
+                ])
             }
             Message::ReplyProgressed(event) => {
                 let Some(Item::Assistant(reply)) = self
@@ -321,7 +316,7 @@ impl Pick {
 
                 reply.timings = event.timings;
 
-                let task = match event.delta {
+                match event.delta {
                     reason::Delta::PromptProcessed(progress) => {
                         reply.prompt = progress;
 
@@ -364,16 +359,7 @@ impl Pick {
 
                         Task::batch(calls.into_iter().map(|call| self.run(call)))
                     }
-                };
-
-                Task::batch([
-                    task,
-                    if self.snap_to_bottom {
-                        operation::snap_to_end("scroll")
-                    } else {
-                        Task::none()
-                    },
-                ])
+                }
             }
             Message::ReplyReceived(Ok(_reply)) => {
                 let _ = self.tasks.remove(&Work::Completion);
@@ -460,11 +446,7 @@ impl Pick {
 
                 logs.push(line);
 
-                if tool.snap_to_bottom {
-                    operation::snap_to_end(tool.call.id.as_str().to_owned())
-                } else {
-                    Task::none()
-                }
+                Task::none()
             }
             Message::ToolFinished(id, result) => {
                 let Some(tool) = self.messages.iter_mut().rev().find_map(|message| {
@@ -539,7 +521,7 @@ impl Pick {
             Message::ToggleReviewMode(false) => {
                 self.mode = Mode::Chat;
 
-                operation::snap_to_end("scroll")
+                operation::snap_to_end("scroll", operation::Animation::Instant)
             }
             Message::RepositoryChanged(status) => {
                 self.repository.status = status.ok();
@@ -677,7 +659,6 @@ impl Pick {
             call,
             state,
             status,
-            snap_to_bottom: true,
         }));
 
         run
@@ -1040,26 +1021,24 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                 "Just say the word.",
             ];
 
-            center_x(
-                center(
-                    column![
-                        typewriter(TITLES[(self.heartbeats / 6) % TITLES.len()])
-                            .size(font::TITLE)
-                            .font(Font {
-                                weight: font::Weight::Bold,
-                                ..Font::MONOSPACE
-                            }),
-                        footer
-                    ]
-                    .align_x(Center),
-                )
+            center(
+                column![
+                    typewriter(TITLES[(self.heartbeats / 6) % TITLES.len()])
+                        .size(font::TITLE)
+                        .font(Font {
+                            weight: font::Weight::Bold,
+                            ..Font::MONOSPACE
+                        }),
+                    footer
+                ]
+                .align_x(Center)
                 .width(Fit.max(MAX_CONTENT_WIDTH as f32 * 0.7)),
             )
             .padding([0, 10])
             .into()
         } else {
             container(
-                scrollable(center_x(
+                scrollable(center(
                     column![
                         column(
                             self.messages
@@ -1078,12 +1057,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                 .id("scroll")
                 .width(Fill)
                 .height(Fill)
-                .on_scroll(|viewport| {
-                    let snap_to_bottom = widget::snaps(viewport);
-
-                    (self.snap_to_bottom != snap_to_bottom)
-                        .then_some(Message::SnapToBottom(snap_to_bottom))
-                })
+                .on_scroll(widget::snap.with(operation::Animation::Auto))
                 .spacing(20)
                 .padding(10),
             )
@@ -1274,7 +1248,8 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
             })
         });
 
-        std::iter::once(reason::Message::System(SYSTEM_PROMPT.to_owned()))
+        [reason::Message::System(SYSTEM_PROMPT.to_owned())]
+            .into_iter()
             .chain(last_compaction)
             .chain(last_user_turn)
     }

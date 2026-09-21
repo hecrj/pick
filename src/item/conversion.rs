@@ -64,7 +64,6 @@ impl ToolRun {
             call: tool_run.call,
             state,
             status: Status::from_session(tool_run.status),
-            snap_to_bottom: false,
         }
     }
 
