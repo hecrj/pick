@@ -72,7 +72,7 @@ impl Call for Write {
                 })
                 .chain(notice.into_iter().map(Element::from));
 
-            column(lines).width(Fill).into()
+            column(lines).width(Fill).padding(10).into()
         })
     }
 
