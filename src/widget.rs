@@ -147,15 +147,18 @@ pub fn context_led<'a, Message: 'a>(
 
             tooltip(
                 led,
-                text!(
-                    "{} / {} ({percent:.1}%)",
-                    locale::thousands(tokens),
-                    locale::thousands(context_size)
+                container(
+                    text!(
+                        "{} / {} ({percent:.1}%)",
+                        locale::thousands(tokens),
+                        locale::thousands(context_size)
+                    )
+                    .size(font::TINY),
                 )
-                .size(font::SMALL),
+                .padding(5)
+                .style(container::rounded_box),
                 tooltip::Position::Top,
             )
-            .style(container::rounded_box)
             .into()
         }
         _ => led.into(),

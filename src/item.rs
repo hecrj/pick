@@ -141,7 +141,7 @@ impl Item {
                     )
                     .map(Message::LinkClicked)),
                 ]
-                .spacing(10)
+                .spacing(15)
                 .into()
             }
             Item::User(message) => right(
