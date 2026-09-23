@@ -3,10 +3,10 @@ use crate::item::{Compaction, Reply, Status, ToolRun};
 use crate::markdown::Markdown;
 use crate::{Item, Tool};
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 impl Item {
-    pub fn from_session(tools: &HashMap<&str, Tool>, item: session::Item) -> Self {
+    pub fn from_session(tools: &BTreeMap<&str, Tool>, item: session::Item) -> Self {
         match item {
             session::Item::User(content) => Self::User(Markdown::new(content)),
             session::Item::Assistant(reply) => Self::Assistant(Reply::from_session(reply)),
@@ -50,7 +50,7 @@ impl Reply {
 }
 
 impl ToolRun {
-    pub fn from_session(tools: &HashMap<&str, Tool>, tool_run: session::ToolRun) -> Self {
+    pub fn from_session(tools: &BTreeMap<&str, Tool>, tool_run: session::ToolRun) -> Self {
         let state = match tools.get(tool_run.call.name.as_str()) {
             Some(tool) => tool.parse(&tool_run.call.arguments),
             None => Err(std::io::Error::other(format!(

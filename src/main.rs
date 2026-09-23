@@ -123,7 +123,7 @@ struct Pick {
     session: session::File,
     repository: Repository,
     server: String,
-    tools: HashMap<&'static str, Tool>,
+    tools: BTreeMap<&'static str, Tool>,
     connection: Connection,
     tasks: HashMap<Work, task::Handle>,
     models: BTreeMap<model::Id, reason::Model>,

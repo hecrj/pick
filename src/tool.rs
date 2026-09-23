@@ -15,7 +15,7 @@ pub use call::Call;
 use iced::{Color, color};
 use serde::de::DeserializeOwned;
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// The background of the tool view
 pub const BACKGROUND: Color = color!(0x111);
@@ -28,7 +28,11 @@ pub struct Tool {
 }
 
 impl Tool {
-    pub fn builtins() -> HashMap<&'static str, Self> {
+    /// The builtin tools, in a stable order: the metadata is
+    /// serialized into every request, where it forms part of the
+    /// prefix the server's prompt cache matches, so the order must
+    /// not vary from process to process.
+    pub fn builtins() -> BTreeMap<&'static str, Self> {
         let tools = [
             Self::new::<Read>(
                 "read",
@@ -124,7 +128,7 @@ impl Tool {
             ),
         ];
 
-        HashMap::from_iter(tools.into_iter().map(|tool| (tool.name, tool)))
+        BTreeMap::from_iter(tools.into_iter().map(|tool| (tool.name, tool)))
     }
 
     pub fn parse(&self, arguments: &str) -> Result<Box<dyn Call>, reason::Error> {
@@ -205,4 +209,21 @@ enum Schema {
     String,
     Integer,
     Boolean,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Tool;
+
+    /// The builtins come out in the same order in every process;
+    /// the tools are serialized into the prefix of every request,
+    /// where the server's prompt cache matches them, so a varying
+    /// order would miss the cache on every restart.
+    #[test]
+    fn the_builtins_are_in_a_stable_order() {
+        assert_eq!(
+            Tool::builtins().keys().copied().collect::<Vec<_>>(),
+            ["bash", "edit", "read", "write"]
+        );
+    }
 }
