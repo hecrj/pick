@@ -1,7 +1,9 @@
+use crate::font;
+use crate::highlight;
 use crate::tool::Output;
 use crate::tool::call::{self, Call};
 
-use iced::widget::{container, text};
+use iced::widget::{column, rich_text, span, text};
 use iced::{Element, Never};
 
 use serde::Deserialize;
@@ -9,14 +11,55 @@ use tokio::io::AsyncBufReadExt;
 
 use std::path::Path;
 
+/// How many bytes a line of the command preview may hold before it
+/// is cut; long, single-line commands are everyday, and a command's
+/// length carries meaning in a way a file's does not, so the budget
+/// is roomier than the write preview's default.
+const PREVIEW_LINE_WIDTH: usize = 500;
+
 #[derive(Deserialize)]
+#[serde(from = "Arguments")]
 pub struct Bash {
     command: String,
+    preview: highlight::Preview,
+}
+
+#[derive(Deserialize)]
+struct Arguments {
+    command: String,
+}
+
+impl From<Arguments> for Bash {
+    fn from(arguments: Arguments) -> Self {
+        let mut preview = highlight::Preview::new("bash", &arguments.command, PREVIEW_LINE_WIDTH);
+
+        if let Some(first) = preview.lines.first_mut() {
+            first.insert(0, span("$ "));
+        }
+
+        Self {
+            command: arguments.command,
+            preview,
+        }
+    }
 }
 
 impl Call for Bash {
     fn view(&self) -> Option<Element<'_, Never>> {
-        Some(container(text(&self.command).size(14)).padding(10).into())
+        let notice = self
+            .preview
+            .notice
+            .as_ref()
+            .map(|notice| text(notice).size(font::SMALL).style(text::secondary));
+
+        let lines = self
+            .preview
+            .lines
+            .iter()
+            .map(|line| rich_text(line).size(font::SMALL).into())
+            .chain(notice.into_iter().map(Element::from));
+
+        Some(column(lines).padding(10).into())
     }
 
     fn run(&self, project: &Path) -> call::Run {
@@ -111,13 +154,59 @@ async fn shell() -> Result<&'static str, std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iced::Theme;
     use sipper::Sipper;
+
+    /// The first line of the preview carries the plain "$ " prompt,
+    /// and the command is highlighted by the bash grammar.
+    #[test]
+    fn the_preview_carries_a_prompt_and_uses_the_bash_grammar() {
+        let bash = Bash::from(Arguments {
+            command: "export FOO=bar".to_owned(),
+        });
+
+        let [line] = &bash.preview.lines[..] else {
+            unreachable!()
+        };
+
+        let prompt = line.first().unwrap();
+        assert_eq!(prompt.text.as_ref(), "$ ");
+        assert!(prompt.color.is_none());
+
+        // The keyword and the variable take the colors of the theme.
+        assert!(line.iter().any(|span| {
+            span.text.as_ref() == "export"
+                && span.color == Some(Theme::CatppuccinMocha.palette().primary.base.color)
+        }));
+
+        assert!(line.iter().any(|span| {
+            span.text.as_ref() == "FOO"
+                && span.color == Some(Theme::CatppuccinMocha.palette().danger.base.color)
+        }));
+    }
+
+    /// A command line longer than the write preview's default budget
+    /// but shorter than the bash budget is not cut.
+    #[test]
+    fn a_long_command_line_is_not_cut_at_the_write_preview_budget() {
+        let command = "x".repeat(highlight::Preview::MAX_LINE_WIDTH + 50);
+
+        let bash = Bash::from(Arguments { command });
+
+        assert_eq!(bash.preview.lines.len(), 1);
+        assert!(
+            bash.preview.lines[0]
+                .iter()
+                .all(|span| span.text.as_ref() != "…")
+        );
+        assert!(bash.preview.notice.is_none());
+    }
 
     #[tokio::test]
     async fn streams_lines_and_accumulates_output() {
-        let bash = Bash {
+        let bash = Bash::from(Arguments {
             command: "echo one; echo two; echo -n three".to_owned(),
-        };
+        });
 
         let mut run = bash.run(Path::new("."));
 
@@ -134,9 +223,9 @@ mod tests {
 
     #[tokio::test]
     async fn long_output_is_capped_to_its_head_and_tail() {
-        let bash = Bash {
+        let bash = Bash::from(Arguments {
             command: "for ((i=1; i<=1500; i++)); do echo $i; done".to_owned(),
-        };
+        });
 
         let mut run = bash.run(Path::new("."));
 
@@ -178,9 +267,9 @@ mod tests {
         #[cfg(windows)]
         let exit_one = process::ExitStatus::from_raw(1);
 
-        let bash = Bash {
+        let bash = Bash::from(Arguments {
             command: "echo boom; exit 1".to_owned(),
-        };
+        });
 
         let mut run = bash.run(Path::new("."));
 
@@ -195,9 +284,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_command_without_output_yields_an_empty_output() {
-        let bash = Bash {
+        let bash = Bash::from(Arguments {
             command: "true".to_owned(),
-        };
+        });
 
         let mut run = bash.run(Path::new("."));
 
@@ -213,9 +302,9 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_signaled_command_is_reported_as_a_notice() {
-        let bash = Bash {
+        let bash = Bash::from(Arguments {
             command: "kill -9 $$".to_owned(),
-        };
+        });
 
         let mut run = bash.run(Path::new("."));
 
