@@ -1,3 +1,4 @@
+use crate::core::Project;
 use crate::core::file;
 use crate::tool::Output;
 use crate::tool::call::{self, Call};
@@ -32,7 +33,7 @@ pub struct Read {
 }
 
 impl Call for Read {
-    fn title(&self) -> Option<Cow<'_, str>> {
+    fn title(&self, project: &Project) -> Option<Cow<'_, str>> {
         let offset = match (self.offset, self.limit) {
             (None, None) => String::new(),
             (Some(offset), None) => format!(" ({offset}..)"),
@@ -40,7 +41,7 @@ impl Call for Read {
             (Some(offset), Some(limit)) => format!(" ({offset}..{end})", end = offset + limit),
         };
 
-        Some(format!("{}{offset}", self.path).into())
+        Some(format!("{}{offset}", project.relative(&self.path).display()).into())
     }
 
     fn run(&self, project: &Path) -> call::Run {

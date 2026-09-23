@@ -1,5 +1,6 @@
 mod conversion;
 
+use crate::core::Project;
 use crate::font;
 use crate::locale;
 use crate::markdown::{self, Markdown};
@@ -56,7 +57,7 @@ impl Item {
         }
     }
 
-    pub fn view(&self) -> Element<'_, Message> {
+    pub fn view(&self, project: &Project) -> Element<'_, Message> {
         match self {
             Item::Assistant(reply) => {
                 let reasoning = if !reply.reasoning.is_empty() {
@@ -165,7 +166,7 @@ impl Item {
                         .state
                         .as_ref()
                         .ok()
-                        .and_then(|state| Some(text(state.title()?).size(font::SMALL)));
+                        .and_then(|state| Some(text(state.title(project)?).size(font::SMALL)));
 
                     row![label, title].spacing(10).align_y(Center)
                 };

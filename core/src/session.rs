@@ -1057,6 +1057,7 @@ mod tests {
     fn a_fresh_file_stays_unique_and_orderly() {
         let project = Project::new(
             std::env::temp_dir().join(format!("pick-sessions-a-{}", std::process::id())),
+            None,
         );
         let _data_dir = Directory::create(project.data_dir()).unwrap();
         std::fs::create_dir_all(File::directory(&project)).unwrap();
@@ -1083,6 +1084,7 @@ mod tests {
     fn the_latest_file_is_the_greatest_name() {
         let project = Project::new(
             std::env::temp_dir().join(format!("pick-sessions-b-{}", std::process::id())),
+            None,
         );
         let _data_dir = Directory::create(project.data_dir()).unwrap();
         let dir = File::directory(&project);
@@ -1103,6 +1105,7 @@ mod tests {
     fn a_missing_sessions_dir_has_no_latest_file() {
         let project = Project::new(
             std::env::temp_dir().join(format!("pick-sessions-c-{}", std::process::id())),
+            None,
         );
 
         assert_eq!(File::latest(&project), None);
@@ -1112,6 +1115,7 @@ mod tests {
     fn an_existing_session_resolves_by_name_and_path() {
         let project = Project::new(
             std::env::temp_dir().join(format!("pick-sessions-d-{}", std::process::id())),
+            None,
         );
         let _data_dir = Directory::create(project.data_dir()).unwrap();
         let dir = File::directory(&project);

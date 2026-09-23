@@ -671,7 +671,7 @@ mod tests {
     use pick_test::Directory;
 
     fn project() -> Project {
-        Project::new("/home/user/code/pick")
+        Project::new("/home/user/code/pick", Some(home()))
     }
 
     fn home() -> PathBuf {
@@ -941,7 +941,7 @@ mod tests {
 
         // The scratchpad leaf and the data directory must exist on
         // the host for their binds.
-        let project = Project::new(&project);
+        let project = Project::new(&project, None);
         prepare_scratch(&scratch_leaf(&project)).expect("scratch leaf");
         let _data_dir = Directory::create(project.data_dir()).expect("data dir");
 

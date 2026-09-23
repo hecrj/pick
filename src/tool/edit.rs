@@ -1,4 +1,5 @@
 use crate::Diff;
+use crate::core::Project;
 use crate::core::file;
 use crate::tool::call::{self, Call};
 use crate::tool::{BACKGROUND, Output};
@@ -52,8 +53,10 @@ impl From<Arguments> for Edit {
 }
 
 impl Call for Edit {
-    fn title(&self) -> Option<Cow<'_, str>> {
-        Some(Cow::Borrowed(&self.path))
+    fn title(&self, project: &Project) -> Option<Cow<'_, str>> {
+        Some(Cow::Owned(
+            project.relative(&self.path).display().to_string(),
+        ))
     }
 
     fn view(&self) -> Option<Element<'_, Never>> {

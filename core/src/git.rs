@@ -419,7 +419,7 @@ mod tests {
     }
 
     fn project(dir: &Directory) -> Project {
-        Project::new(dir.as_ref())
+        Project::new(dir.as_ref(), None)
     }
 
     /// Runs git in the repo, asserting success.

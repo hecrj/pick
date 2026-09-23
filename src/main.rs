@@ -10,7 +10,6 @@ mod tool;
 mod widget;
 
 use crate::core::git;
-use crate::core::path;
 use crate::core::sandbox;
 use crate::core::session;
 use crate::core::{Project, Session};
@@ -39,7 +38,6 @@ use reason::model;
 
 use std::collections::{BTreeMap, HashMap};
 use std::env;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 /// The flag that runs the app without the bubblewrap sandbox.
@@ -119,7 +117,6 @@ fn main() -> Result<(), iced::Error> {
 
 struct Pick {
     project: Project,
-    home: Option<PathBuf>,
     session: session::File,
     repository: Repository,
     server: String,
@@ -203,7 +200,6 @@ impl Pick {
     ) -> (Self, Task<Message>) {
         let mut pick = Self {
             project: project.clone(),
-            home: env::home_dir(),
             session: session.clone(),
             repository: Repository::default(),
             server: "http://127.0.0.1:9931".to_owned(),
@@ -1043,7 +1039,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                         column(
                             self.messages
                                 .iter()
-                                .map(Item::view)
+                                .map(|item| item.view(&self.project))
                                 .enumerate()
                                 .map(|(i, item)| item.map(Message::Item.with(i))),
                         )
@@ -1067,8 +1063,6 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
     }
 
     fn status_bar(&self) -> Element<'_, Message> {
-        let project = path::tildify(&self.project, self.home.as_deref());
-
         let repository = self.repository.status.as_ref().map(|status| {
             let branch = match &status.branch {
                 git::Branch::Unborn(name) | git::Branch::Named(name) => text!("@ {name}"),
@@ -1174,7 +1168,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
         };
 
         row![
-            text(project.display().to_string()).size(font::SMALL),
+            text(self.project.to_string()).size(font::SMALL),
             repository,
             space::horizontal(),
             server,

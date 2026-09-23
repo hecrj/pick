@@ -1,3 +1,4 @@
+use crate::core::Project;
 use crate::font;
 use crate::highlight;
 use crate::tool::Output;
@@ -79,7 +80,7 @@ impl From<Arguments> for Bash {
 }
 
 impl Call for Bash {
-    fn title(&self) -> Option<Cow<'_, str>> {
+    fn title(&self, _project: &Project) -> Option<Cow<'_, str>> {
         self.title.as_deref().map(Cow::Borrowed)
     }
 
@@ -248,12 +249,13 @@ mod tests {
     /// altogether when it is empty.
     #[test]
     fn a_title_is_trimmed_and_dropped_when_empty() {
+        let project = Project::current_dir().expect("cwd");
         let bash = Bash::from(Arguments {
             command: "ls".to_owned(),
             title: Some("  List the files  ".to_owned()),
         });
 
-        assert_eq!(bash.title().as_deref(), Some("List the files"));
+        assert_eq!(bash.title(&project).as_deref(), Some("List the files"));
 
         for empty in ["", "   "] {
             let bash = Bash::from(Arguments {
@@ -261,7 +263,7 @@ mod tests {
                 title: Some(empty.to_owned()),
             });
 
-            assert_eq!(bash.title(), None);
+            assert_eq!(bash.title(&project), None);
         }
     }
 
@@ -270,6 +272,7 @@ mod tests {
     /// without a word boundary falls back to the character one.
     #[test]
     fn an_overlong_title_is_cut_at_a_word_boundary() {
+        let project = Project::current_dir().expect("cwd");
         let bash = Bash::from(Arguments {
             command: "ls".to_owned(),
             title: Some(
@@ -279,7 +282,7 @@ mod tests {
         });
 
         assert_eq!(
-            bash.title().as_deref(),
+            bash.title(&project).as_deref(),
             Some("install the dependencies, build the workspace, and verify…")
         );
 
@@ -289,18 +292,19 @@ mod tests {
         });
 
         let expected = format!("{}…", "x".repeat(TITLE_WIDTH));
-        assert_eq!(bash.title().as_deref(), Some(expected.as_str()));
+        assert_eq!(bash.title(&project).as_deref(), Some(expected.as_str()));
     }
 
     /// An absent title keeps the header to the tool's label.
     #[test]
     fn an_absent_title_yields_none() {
+        let project = Project::current_dir().expect("cwd");
         let bash = Bash::from(Arguments {
             command: "ls".to_owned(),
             title: None,
         });
 
-        assert_eq!(bash.title(), None);
+        assert_eq!(bash.title(&project), None);
     }
 
     #[tokio::test]

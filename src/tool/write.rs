@@ -1,3 +1,4 @@
+use crate::core::Project;
 use crate::core::file;
 use crate::highlight;
 use crate::tool::Output;
@@ -38,8 +39,10 @@ impl From<Arguments> for Write {
 }
 
 impl Call for Write {
-    fn title(&self) -> Option<Cow<'_, str>> {
-        Some(Cow::Borrowed(&self.path))
+    fn title(&self, project: &Project) -> Option<Cow<'_, str>> {
+        Some(Cow::Owned(
+            project.relative(&self.path).display().to_string(),
+        ))
     }
 
     fn view(&self) -> Option<Element<'_, Never>> {

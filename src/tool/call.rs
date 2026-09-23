@@ -1,3 +1,4 @@
+use crate::core::Project;
 use crate::tool;
 
 use iced::{Element, Never};
@@ -17,7 +18,7 @@ pub trait Call {
     /// content (file contents, command output) unbracketed.
     fn run(&self, project: &Path) -> Run;
 
-    fn title(&self) -> Option<Cow<'_, str>> {
+    fn title(&self, _project: &Project) -> Option<Cow<'_, str>> {
         None
     }
 
