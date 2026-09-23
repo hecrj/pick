@@ -57,12 +57,20 @@ impl Tool {
             Self::new::<Bash>(
                 "bash",
                 "Run a bash command",
-                &[Parameter {
-                    name: "command",
-                    description: "Command to run",
-                    schema: Schema::String,
-                    required: true,
-                }],
+                &[
+                    Parameter {
+                        name: "command",
+                        description: "Command to run",
+                        schema: Schema::String,
+                        required: true,
+                    },
+                    Parameter {
+                        name: "title",
+                        description: "A short 3-5 word summary of the command",
+                        schema: Schema::String,
+                        required: false,
+                    },
+                ],
             ),
             Self::new::<Write>(
                 "write",

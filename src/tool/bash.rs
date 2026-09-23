@@ -9,6 +9,7 @@ use iced::{Element, Never};
 use serde::Deserialize;
 use tokio::io::AsyncBufReadExt;
 
+use std::borrow::Cow;
 use std::path::Path;
 
 /// How many bytes a line of the command preview may hold before it
@@ -17,20 +18,52 @@ use std::path::Path;
 /// is roomier than the write preview's default.
 const PREVIEW_LINE_WIDTH: usize = 500;
 
+/// How many characters a command's title may hold before it is cut;
+/// it sits in the header next to the tool's label, where an
+/// overlong one would crowd the message.
+const TITLE_WIDTH: usize = 60;
+
 #[derive(Deserialize)]
 #[serde(from = "Arguments")]
 pub struct Bash {
     command: String,
+    title: Option<String>,
     preview: highlight::Preview,
 }
 
 #[derive(Deserialize)]
 struct Arguments {
     command: String,
+    #[serde(default)]
+    title: Option<String>,
 }
 
 impl From<Arguments> for Bash {
     fn from(arguments: Arguments) -> Self {
+        /// A title, sanitized for the header: surrounding
+        /// whitespace is trimmed, an empty one is dropped, and an
+        /// overlong one is cut at the last word boundary within
+        /// `TITLE_WIDTH`, with an ellipsis for what fell off — or
+        /// at the character boundary when no word boundary is at
+        /// hand.
+        fn sanitize_title(title: &str) -> Option<String> {
+            let title = title.trim();
+
+            if title.is_empty() {
+                return None;
+            }
+
+            let end = title.floor_char_boundary(TITLE_WIDTH);
+
+            if end < title.len() {
+                let cut = title[..end].rfind(char::is_whitespace).unwrap_or(end);
+
+                return Some(format!("{}…", &title[..cut]));
+            }
+
+            Some(title.to_owned())
+        }
+
         let mut preview = highlight::Preview::new("bash", &arguments.command, PREVIEW_LINE_WIDTH);
 
         if let Some(first) = preview.lines.first_mut() {
@@ -39,12 +72,17 @@ impl From<Arguments> for Bash {
 
         Self {
             command: arguments.command,
+            title: arguments.title.as_deref().and_then(sanitize_title),
             preview,
         }
     }
 }
 
 impl Call for Bash {
+    fn title(&self) -> Option<Cow<'_, str>> {
+        self.title.as_deref().map(Cow::Borrowed)
+    }
+
     fn view(&self) -> Option<Element<'_, Never>> {
         let notice = self
             .preview
@@ -163,6 +201,7 @@ mod tests {
     fn the_preview_carries_a_prompt_and_uses_the_bash_grammar() {
         let bash = Bash::from(Arguments {
             command: "export FOO=bar".to_owned(),
+            title: None,
         });
 
         let [line] = &bash.preview.lines[..] else {
@@ -191,7 +230,10 @@ mod tests {
     fn a_long_command_line_is_not_cut_at_the_write_preview_budget() {
         let command = "x".repeat(highlight::Preview::MAX_LINE_WIDTH + 50);
 
-        let bash = Bash::from(Arguments { command });
+        let bash = Bash::from(Arguments {
+            command,
+            title: None,
+        });
 
         assert_eq!(bash.preview.lines.len(), 1);
         assert!(
@@ -202,10 +244,70 @@ mod tests {
         assert!(bash.preview.notice.is_none());
     }
 
+    /// A title is trimmed before it is shown, and dropped
+    /// altogether when it is empty.
+    #[test]
+    fn a_title_is_trimmed_and_dropped_when_empty() {
+        let bash = Bash::from(Arguments {
+            command: "ls".to_owned(),
+            title: Some("  List the files  ".to_owned()),
+        });
+
+        assert_eq!(bash.title().as_deref(), Some("List the files"));
+
+        for empty in ["", "   "] {
+            let bash = Bash::from(Arguments {
+                command: "ls".to_owned(),
+                title: Some(empty.to_owned()),
+            });
+
+            assert_eq!(bash.title(), None);
+        }
+    }
+
+    /// An overlong title is cut at the last word boundary within
+    /// `TITLE_WIDTH`, with an ellipsis for what fell off; a title
+    /// without a word boundary falls back to the character one.
+    #[test]
+    fn an_overlong_title_is_cut_at_a_word_boundary() {
+        let bash = Bash::from(Arguments {
+            command: "ls".to_owned(),
+            title: Some(
+                "install the dependencies, build the workspace, and verify that the tests pass"
+                    .to_owned(),
+            ),
+        });
+
+        assert_eq!(
+            bash.title().as_deref(),
+            Some("install the dependencies, build the workspace, and verify…")
+        );
+
+        let bash = Bash::from(Arguments {
+            command: "ls".to_owned(),
+            title: Some("x".repeat(TITLE_WIDTH + 10)),
+        });
+
+        let expected = format!("{}…", "x".repeat(TITLE_WIDTH));
+        assert_eq!(bash.title().as_deref(), Some(expected.as_str()));
+    }
+
+    /// An absent title keeps the header to the tool's label.
+    #[test]
+    fn an_absent_title_yields_none() {
+        let bash = Bash::from(Arguments {
+            command: "ls".to_owned(),
+            title: None,
+        });
+
+        assert_eq!(bash.title(), None);
+    }
+
     #[tokio::test]
     async fn streams_lines_and_accumulates_output() {
         let bash = Bash::from(Arguments {
             command: "echo one; echo two; echo -n three".to_owned(),
+            title: None,
         });
 
         let mut run = bash.run(Path::new("."));
@@ -225,6 +327,7 @@ mod tests {
     async fn long_output_is_capped_to_its_head_and_tail() {
         let bash = Bash::from(Arguments {
             command: "for ((i=1; i<=1500; i++)); do echo $i; done".to_owned(),
+            title: None,
         });
 
         let mut run = bash.run(Path::new("."));
@@ -269,6 +372,7 @@ mod tests {
 
         let bash = Bash::from(Arguments {
             command: "echo boom; exit 1".to_owned(),
+            title: None,
         });
 
         let mut run = bash.run(Path::new("."));
@@ -286,6 +390,7 @@ mod tests {
     async fn a_command_without_output_yields_an_empty_output() {
         let bash = Bash::from(Arguments {
             command: "true".to_owned(),
+            title: None,
         });
 
         let mut run = bash.run(Path::new("."));
@@ -304,6 +409,7 @@ mod tests {
     async fn a_signaled_command_is_reported_as_a_notice() {
         let bash = Bash::from(Arguments {
             command: "kill -9 $$".to_owned(),
+            title: None,
         });
 
         let mut run = bash.run(Path::new("."));
