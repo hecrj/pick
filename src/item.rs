@@ -1,9 +1,11 @@
 mod conversion;
 
 use crate::core::Project;
+use crate::diff;
 use crate::font;
 use crate::locale;
 use crate::markdown::{self, Markdown};
+use crate::repository;
 use crate::tool;
 use crate::widget;
 
@@ -22,6 +24,7 @@ pub enum Item {
     User(Markdown),
     Assistant(Reply),
     Tool(ToolRun),
+    Review(repository::Review),
     Compaction(Compaction),
 }
 
@@ -43,6 +46,7 @@ impl Item {
                 id: tool.call.id.clone(),
                 content: tool.status.content().unwrap_or_default(),
             }),
+            Item::Review(review) => reason::Message::User(review.prompt()),
             Item::Compaction { .. } => return None,
         })
     }
@@ -308,6 +312,36 @@ impl Item {
                 .style(container::bordered_box)
                 .into()
             }
+            Item::Review(review) => column(review.comments.iter().map(|comment| {
+                let header = {
+                    let label = container(text("review").size(font::SMALL))
+                        .padding([2, 5])
+                        .style(container::dark);
+
+                    let title = text(comment.index.to_string()).size(font::SMALL);
+
+                    row![label, title].spacing(10).padding(10).align_y(Center)
+                };
+
+                container(column![
+                    header,
+                    container(
+                        Element::from(column(comment.hunk.view().map(diff::View::view))).map(never)
+                    )
+                    .style(|_theme| { container::Style::default().background(tool::BACKGROUND) }),
+                    container(
+                        markdown::view(comment.content.items(), Font::DEFAULT, font::NORMAL)
+                            .map(Message::LinkClicked)
+                    )
+                    .padding(10),
+                ])
+                .width(Fill)
+                .padding(1)
+                .style(container::bordered_box)
+                .into()
+            }))
+            .spacing(10)
+            .into(),
             Item::Compaction(compaction) => {
                 let notice = center_x(text(if compaction.is_finished {
                     format!("Compacted into {} tokens", compaction.tokens)

@@ -9,9 +9,9 @@ pub struct Markdown {
 }
 
 impl Markdown {
-    pub fn new(raw: String) -> Self {
+    pub fn new(raw: &str) -> Self {
         Self {
-            content: markdown::Content::parse(&raw),
+            content: markdown::Content::parse(raw),
         }
     }
 

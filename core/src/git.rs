@@ -125,6 +125,158 @@ pub struct Range {
     pub count: usize,
 }
 
+impl fmt::Display for Range {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{},{}", self.start, self.count)
+    }
+}
+
+impl Range {
+    pub(crate) fn encode(&self) -> decoder::Value {
+        use decoder::encode::{map, u64};
+
+        map([
+            ("start", u64(self.start as u64)),
+            ("count", u64(self.count as u64)),
+        ])
+        .into_value()
+    }
+
+    pub(crate) fn decode(value: decoder::Value) -> decoder::Result<Self> {
+        use decoder::decode::{map, u64};
+
+        let mut fields = map(value)?;
+
+        Ok(Self {
+            start: fields.required("start", u64)? as usize,
+            count: fields.required("count", u64)? as usize,
+        })
+    }
+}
+
+impl Hunk {
+    /// Slices the hunk to the given range of lines, adjusting the
+    /// line ranges to the slice.
+    pub fn slice(&self, range: std::ops::RangeInclusive<usize>) -> Self {
+        use self::Line::*;
+
+        let lines = &self.lines[range];
+
+        let (mut old_start, mut new_start) = (None, None);
+        let (mut old_count, mut new_count) = (0, 0);
+
+        for line in lines {
+            match line {
+                Context { old, new, .. } => {
+                    old_start.get_or_insert(*old);
+                    new_start.get_or_insert(*new);
+                    old_count += 1;
+                    new_count += 1;
+                }
+                Added { new, .. } => {
+                    new_start.get_or_insert(*new);
+                    new_count += 1;
+                }
+                Deleted { old, .. } => {
+                    old_start.get_or_insert(*old);
+                    old_count += 1;
+                }
+            }
+        }
+
+        Self {
+            old: Range {
+                start: old_start.unwrap_or_default(),
+                count: old_count,
+            },
+            new: Range {
+                start: new_start.unwrap_or_default(),
+                count: new_count,
+            },
+            heading: self.heading.clone(),
+            lines: lines.into(),
+        }
+    }
+
+    /// The position of the line with the given number, if any
+    pub fn position(&self, number: Number) -> Option<usize> {
+        self.lines.iter().position(|line| line.number() == number)
+    }
+
+    /// Strips the shared indentation of the lines, if any
+    pub fn trim(self) -> Self {
+        use self::Line::*;
+
+        fn unindent(text: &str, indent: usize) -> &str {
+            let ws = text.len() - text.trim_start().len();
+
+            &text[indent.min(ws)..]
+        }
+
+        // Whitespace-only lines don't count toward the shared indentation
+        let indent = self
+            .lines
+            .iter()
+            .filter(|line| !line.text().trim().is_empty())
+            .map(|line| line.text().len() - line.text().trim_start().len())
+            .min()
+            .unwrap_or(0);
+
+        Self {
+            lines: self
+                .lines
+                .iter()
+                .map(|line| match line {
+                    Context { old, new, text } => Context {
+                        old: *old,
+                        new: *new,
+                        text: unindent(text, indent).into(),
+                    },
+                    Added { new, text } => Added {
+                        new: *new,
+                        text: unindent(text, indent).into(),
+                    },
+                    Deleted { old, text } => Deleted {
+                        old: *old,
+                        text: unindent(text, indent).into(),
+                    },
+                })
+                .collect::<Vec<_>>()
+                .into(),
+            ..self
+        }
+    }
+}
+
+impl Hunk {
+    pub(crate) fn encode(&self) -> decoder::Value {
+        use decoder::encode::{map, optional, sequence, string};
+
+        map([
+            ("old", self.old.encode()),
+            ("new", self.new.encode()),
+            ("heading", optional(string, self.heading.as_deref())),
+            ("lines", sequence(Line::encode, self.lines.iter())),
+        ])
+        .into_value()
+    }
+
+    pub(crate) fn decode(value: decoder::Value) -> decoder::Result<Self> {
+        use decoder::decode::{map, optional, sequence, string};
+
+        let mut fields = map(value)?;
+
+        let lines: Vec<Line> = fields.required("lines", sequence(Line::decode))?;
+
+        Ok(Self {
+            old: fields.required("old", Range::decode)?,
+            new: fields.required("new", Range::decode)?,
+            heading: fields.required("heading", optional(string))?,
+            lines: lines.into(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Line {
     Context {
@@ -140,6 +292,124 @@ pub enum Line {
         old: usize,
         text: String,
     },
+}
+
+impl Line {
+    pub fn number(&self) -> Number {
+        match self {
+            Self::Context { old, new, .. } => Number::Context(*old, *new),
+            Self::Added { new, .. } => Number::New(*new),
+            Self::Deleted { old, .. } => Number::Old(*old),
+        }
+    }
+
+    /// The text of the line
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Context { text, .. } | Self::Added { text, .. } | Self::Deleted { text, .. } => {
+                text
+            }
+        }
+    }
+}
+
+impl Line {
+    pub(crate) fn encode(&self) -> decoder::Value {
+        use decoder::encode::{map, string, u64};
+
+        let (type_, line) = match self {
+            Self::Context { old, new, text } => (
+                "context",
+                map([
+                    ("old", u64(*old as u64)),
+                    ("new", u64(*new as u64)),
+                    ("text", string(text)),
+                ]),
+            ),
+            Self::Added { new, text } => (
+                "added",
+                map([("new", u64(*new as u64)), ("text", string(text))]),
+            ),
+            Self::Deleted { old, text } => (
+                "deleted",
+                map([("old", u64(*old as u64)), ("text", string(text))]),
+            ),
+        };
+
+        line.tag("line", type_).into_value()
+    }
+
+    pub(crate) fn decode(value: decoder::Value) -> decoder::Result<Self> {
+        use decoder::decode::{map, string, u64};
+
+        let mut fields = map(value)?;
+
+        Ok(match fields.required("line", string)?.as_str() {
+            "context" => Self::Context {
+                old: fields.required("old", u64)? as usize,
+                new: fields.required("new", u64)? as usize,
+                text: fields.required("text", string)?,
+            },
+            "added" => Self::Added {
+                new: fields.required("new", u64)? as usize,
+                text: fields.required("text", string)?,
+            },
+            "deleted" => Self::Deleted {
+                old: fields.required("old", u64)? as usize,
+                text: fields.required("text", string)?,
+            },
+            other => return Err(decoder::Error::custom(format!("invalid line: {other}"))),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Number {
+    Old(usize),
+    New(usize),
+    Context(usize, usize),
+}
+
+impl fmt::Display for Number {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Old(n) => write!(f, "L{n}"),
+            Self::New(n) | Self::Context(_, n) => write!(f, "R{n}"),
+        }
+    }
+}
+
+impl Number {
+    pub(crate) fn encode(&self) -> decoder::Value {
+        use decoder::encode::{map, u64};
+
+        let (type_, number) = match self {
+            Self::Old(n) => ("old", map([("n", u64(*n as u64))])),
+            Self::New(n) => ("new", map([("n", u64(*n as u64))])),
+            Self::Context(old, new) => (
+                "context",
+                map([("old", u64(*old as u64)), ("new", u64(*new as u64))]),
+            ),
+        };
+
+        number.tag("number", type_).into_value()
+    }
+
+    pub(crate) fn decode(value: decoder::Value) -> decoder::Result<Self> {
+        use decoder::decode::{map, string, u64};
+
+        let mut fields = map(value)?;
+
+        Ok(match fields.required("number", string)?.as_str() {
+            "old" => Self::Old(fields.required("n", u64)? as usize),
+            "new" => Self::New(fields.required("n", u64)? as usize),
+            "context" => Self::Context(
+                fields.required("old", u64)? as usize,
+                fields.required("new", u64)? as usize,
+            ),
+            other => return Err(decoder::Error::custom(format!("invalid number: {other}"))),
+        })
+    }
 }
 
 impl Diff {
@@ -916,5 +1186,193 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn slice_adjusts_the_ranges() {
+        let hunk = Hunk {
+            old: Range {
+                start: 10,
+                count: 5,
+            },
+            new: Range {
+                start: 10,
+                count: 6,
+            },
+            heading: Some("fn main".into()),
+            lines: Arc::from([
+                Line::Context {
+                    old: 10,
+                    new: 10,
+                    text: "a".into(),
+                },
+                Line::Context {
+                    old: 11,
+                    new: 11,
+                    text: "b".into(),
+                },
+                Line::Deleted {
+                    old: 12,
+                    text: "c".into(),
+                },
+                Line::Added {
+                    new: 12,
+                    text: "C".into(),
+                },
+                Line::Context {
+                    old: 13,
+                    new: 13,
+                    text: "d".into(),
+                },
+            ]),
+        };
+
+        let slice = hunk.slice(1..=3);
+
+        assert_eq!(
+            slice.old,
+            Range {
+                start: 11,
+                count: 2
+            }
+        );
+        assert_eq!(
+            slice.new,
+            Range {
+                start: 11,
+                count: 2
+            }
+        );
+        assert_eq!(slice.heading, Some("fn main".into()));
+        assert_eq!(slice.lines.len(), 3);
+    }
+
+    #[test]
+    fn position_resolves_the_line_of_a_number() {
+        let hunk = Hunk {
+            old: Range {
+                start: 10,
+                count: 5,
+            },
+            new: Range {
+                start: 10,
+                count: 6,
+            },
+            heading: Some("fn main".into()),
+            lines: Arc::from([
+                Line::Context {
+                    old: 10,
+                    new: 10,
+                    text: "a".into(),
+                },
+                Line::Context {
+                    old: 11,
+                    new: 11,
+                    text: "b".into(),
+                },
+                Line::Deleted {
+                    old: 12,
+                    text: "c".into(),
+                },
+                Line::Added {
+                    new: 12,
+                    text: "C".into(),
+                },
+                Line::Context {
+                    old: 13,
+                    new: 13,
+                    text: "d".into(),
+                },
+            ]),
+        };
+
+        assert_eq!(hunk.position(Number::Context(10, 10)), Some(0));
+        assert_eq!(hunk.position(Number::Old(12)), Some(2));
+        assert_eq!(hunk.position(Number::New(12)), Some(3));
+        assert_eq!(hunk.position(Number::Context(13, 13)), Some(4));
+        assert_eq!(hunk.position(Number::New(99)), None);
+    }
+
+    #[test]
+    fn trim_strips_the_shared_indentation() {
+        let hunk = Hunk {
+            old: Range { start: 1, count: 5 },
+            new: Range { start: 1, count: 5 },
+            heading: Some("fn main".into()),
+            lines: Arc::from([
+                Line::Context {
+                    old: 1,
+                    new: 1,
+                    text: "    let x = 1;".into(),
+                },
+                Line::Added {
+                    new: 2,
+                    text: "        let y = 2;".into(),
+                },
+                Line::Deleted {
+                    old: 2,
+                    text: "    let z = 3;".into(),
+                },
+                Line::Context {
+                    old: 3,
+                    new: 3,
+                    text: "".into(),
+                },
+                Line::Context {
+                    old: 4,
+                    new: 4,
+                    text: "   ".into(),
+                },
+                Line::Context {
+                    old: 5,
+                    new: 5,
+                    text: "    }".into(),
+                },
+            ]),
+        };
+
+        let hunk = hunk.trim();
+
+        let [first, second, third, fourth, fifth, sixth] = hunk.lines.as_ref() else {
+            unreachable!()
+        };
+
+        assert_eq!(first.text(), "let x = 1;");
+        assert_eq!(second.text(), "    let y = 2;");
+        assert_eq!(third.text(), "let z = 3;");
+        assert_eq!(fourth.text(), "");
+        assert_eq!(fifth.text(), "");
+        assert_eq!(sixth.text(), "}");
+
+        // The ranges and heading are untouched
+        assert_eq!(hunk.old, Range { start: 1, count: 5 });
+        assert_eq!(hunk.new, Range { start: 1, count: 5 });
+        assert_eq!(hunk.heading, Some("fn main".into()));
+    }
+
+    #[test]
+    fn trim_leaves_unindented_lines_alone() {
+        let hunk = Hunk {
+            old: Range { start: 1, count: 2 },
+            new: Range { start: 1, count: 2 },
+            heading: None,
+            lines: Arc::from([
+                Line::Context {
+                    old: 1,
+                    new: 1,
+                    text: "    x".into(),
+                },
+                Line::Context {
+                    old: 2,
+                    new: 2,
+                    text: "y".into(),
+                },
+            ]),
+        };
+
+        let hunk = hunk.trim();
+
+        assert_eq!(hunk.lines[0].text(), "    x");
+        assert_eq!(hunk.lines[1].text(), "y");
     }
 }

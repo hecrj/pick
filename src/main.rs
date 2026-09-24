@@ -6,6 +6,7 @@ mod highlight;
 mod item;
 mod locale;
 mod markdown;
+mod repository;
 mod tool;
 mod widget;
 
@@ -17,6 +18,7 @@ use crate::diff::Diff;
 use crate::font::Font;
 use crate::item::Item;
 use crate::markdown::Markdown;
+use crate::repository::Repository;
 use crate::tool::Tool;
 
 use iced::border;
@@ -29,7 +31,7 @@ use iced::widget::operation;
 use iced::widget::{
     button, center, column, container, row, scrollable, space, sticky, text, text_editor,
 };
-use iced::{Background, Center, Color, Element, Fill, Fit, Subscription, Task, Theme, never};
+use iced::{Background, Center, Color, Element, Fill, Fit, Subscription, Task, Theme};
 use iced_palace::widget::typewriter;
 
 use function::Binary;
@@ -38,7 +40,6 @@ use reason::model;
 
 use std::collections::{BTreeMap, HashMap};
 use std::env;
-use std::sync::Arc;
 
 /// The flag that runs the app without the bubblewrap sandbox.
 const LIVE: &str = "--we-doin-it-live";
@@ -132,24 +133,6 @@ struct Pick {
     heartbeats: usize,
 }
 
-#[derive(Default)]
-struct Repository {
-    status: Option<git::Status>,
-    files: Vec<File>,
-}
-
-#[derive(Debug, Clone)]
-struct File {
-    raw: git::File,
-    hunks: Arc<[Hunk]>,
-}
-
-#[derive(Debug, Clone)]
-struct Hunk {
-    raw: git::Hunk,
-    diff: Diff,
-}
-
 #[derive(Debug, Clone, Copy)]
 enum Mode {
     Chat,
@@ -188,8 +171,7 @@ enum Message {
     Item(usize, item::Message),
     Abort,
     ToggleReviewMode(bool),
-    RepositoryChanged(git::Result<git::Status>),
-    RepositoryDiffed(git::Result<Vec<File>>),
+    Repository(repository::Message),
 }
 
 impl Pick {
@@ -198,10 +180,12 @@ impl Pick {
         prompt: Option<&str>,
         session: &session::File,
     ) -> (Self, Task<Message>) {
+        let (repository, load_repository) = repository::Repository::new(project.clone());
+
         let mut pick = Self {
             project: project.clone(),
             session: session.clone(),
-            repository: Repository::default(),
+            repository,
             server: "http://127.0.0.1:9931".to_owned(),
             tools: Tool::builtins(),
             connection: Connection::Disconnected,
@@ -223,8 +207,6 @@ impl Pick {
             Task::batch([pick.connect(), load])
         };
 
-        let status = pick.status();
-
         (
             pick,
             Task::batch([
@@ -233,7 +215,7 @@ impl Pick {
                 } else {
                     boot
                 },
-                status,
+                load_repository.map(Message::Repository),
             ]),
         )
     }
@@ -281,7 +263,7 @@ impl Pick {
                 let message = self.input.text();
 
                 self.input = text_editor::Content::new();
-                self.messages.push(Item::User(Markdown::new(message)));
+                self.messages.push(Item::User(Markdown::new(&message)));
 
                 let work = if self.tasks.is_empty() {
                     self.work()
@@ -471,7 +453,10 @@ impl Pick {
                 };
 
                 if self.tasks.is_empty() {
-                    Task::batch([self.work(), self.status()])
+                    Task::batch([
+                        self.work(),
+                        self.repository.status().map(Message::Repository),
+                    ])
                 } else {
                     Task::none()
                 }
@@ -512,28 +497,29 @@ impl Pick {
             Message::ToggleReviewMode(true) => {
                 self.mode = Mode::Review;
 
-                self.diff()
+                self.repository.diff().map(Message::Repository)
             }
             Message::ToggleReviewMode(false) => {
                 self.mode = Mode::Chat;
 
                 operation::snap_to_end("scroll", operation::Animation::Instant)
             }
-            Message::RepositoryChanged(status) => {
-                self.repository.status = status.ok();
+            Message::Repository(message) => match self.repository.update(message) {
+                repository::Action::None => Task::none(),
+                repository::Action::Run(task) => task.map(Message::Repository),
+                repository::Action::Review(review) => {
+                    self.messages.push(Item::Review(review));
 
-                Task::none()
-            }
-            Message::RepositoryDiffed(Ok(files)) => {
-                self.repository.files = files;
+                    self.mode = Mode::Chat;
 
-                Task::none()
-            }
-            Message::RepositoryDiffed(Err(error)) => {
-                log::error!("{error}");
+                    self.abort();
 
-                Task::none()
-            }
+                    Task::batch([
+                        operation::snap_to_end("scroll", operation::Animation::Instant),
+                        self.work(),
+                    ])
+                }
+            },
         }
     }
 
@@ -569,13 +555,6 @@ impl Pick {
         }
 
         Task::none()
-    }
-
-    fn status(&self) -> Task<Message> {
-        Task::perform(
-            git::Status::current(&self.project),
-            Message::RepositoryChanged,
-        )
     }
 
     fn work(&mut self) -> Task<Message> {
@@ -811,6 +790,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                 Item::Assistant(_) => i + 1 != self.messages.len() || self.tasks.is_empty(),
                 Item::Tool(tool_run) => !matches!(tool_run.status, item::Status::Running { .. }),
                 Item::Compaction(compaction) => compaction.is_finished,
+                Item::Review(_) => true,
             })
             .map(|(_, item)| item.to_session())
             .map(session::Event::ItemAdded)
@@ -833,64 +813,6 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
         )
     }
 
-    fn diff(&self) -> Task<Message> {
-        let Some(status) = &self.repository.status else {
-            return Task::none();
-        };
-
-        let project = self.project.clone();
-        let status = status.clone();
-
-        Task::perform(
-            async move {
-                let diff = git::Diff::current(&project, &status).await?;
-
-                let tasks: Vec<Vec<_>> = diff
-                    .files
-                    .iter()
-                    .map(|file| {
-                        file.hunks
-                            .iter()
-                            .map(|hunk| {
-                                let path = file.path.to_owned();
-                                let hunk = hunk.clone();
-
-                                tokio::task::spawn_blocking(move || {
-                                    Diff::from_hunk(
-                                        &path,
-                                        &hunk,
-                                        Theme::CatppuccinMocha.seed().background, // TODO: Dynamic theme
-                                    )
-                                })
-                            })
-                            .collect()
-                    })
-                    .collect();
-
-                let mut files = Vec::with_capacity(diff.files.len());
-
-                for (file, tasks) in diff.files.iter().zip(tasks) {
-                    let mut hunks = Vec::new();
-
-                    for (hunk, task) in file.hunks.iter().zip(tasks) {
-                        hunks.push(Hunk {
-                            raw: hunk.clone(),
-                            diff: task.await?,
-                        });
-                    }
-
-                    files.push(File {
-                        raw: file.clone(),
-                        hunks: Arc::from(hunks),
-                    });
-                }
-
-                Ok(files)
-            },
-            Message::RepositoryDiffed,
-        )
-    }
-
     fn view(&self) -> Element<'_, Message> {
         match self.mode {
             Mode::Chat => self.chat(),
@@ -899,71 +821,18 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
     }
 
     fn review(&self) -> Element<'_, Message> {
+        let footer = sticky(container(self.status_bar()).padding(10).style(|theme| {
+            container::Style::default().background(
+                gradient::Linear::new(0)
+                    .add_stop(0.7, theme.seed().background)
+                    .add_stop(1.0, Color::TRANSPARENT),
+            )
+        }));
+
         container(
             scrollable(column![
-                column(self.repository.files.iter().map(|file| {
-                    let header = container(
-                        row![
-                            text(&file.raw.path).size(font::SMALL).width(Fill),
-                            text!("+{}", file.raw.insertions)
-                                .style(text::success)
-                                .size(font::SMALL),
-                            text!("-{}", file.raw.deletions)
-                                .style(text::danger)
-                                .size(font::SMALL),
-                        ]
-                        .spacing(10)
-                        .align_y(Center),
-                    )
-                    .padding(10);
-
-                    let hunks = column(file.hunks.iter().map(|hunk| {
-                        Element::from(column(
-                            hunk.diff
-                                .view(Some((hunk.raw.old.start, hunk.raw.new.start))),
-                        ))
-                        .map(never)
-                    }))
-                    .spacing(10);
-
-                    container(column![
-                        sticky(
-                            container(
-                                container(header)
-                                    .style(|theme| {
-                                        container::Style::default()
-                                            .background(theme.palette().background.weakest.color)
-                                            .border(
-                                                border::rounded(border::top(5))
-                                                    .width(1)
-                                                    .color(theme.palette().background.weak.color),
-                                            )
-                                    })
-                                    .padding(1)
-                            )
-                            .padding(padding::top(10))
-                            .style(|theme| container::Style::default()
-                                .background(theme.seed().background))
-                        ),
-                        container(hunks).padding(1),
-                    ])
-                    .style(|theme| container::Style {
-                        border: border::rounded(border::bottom(5))
-                            .width(1)
-                            .color(theme.palette().background.weak.color),
-                        ..container::Style::default()
-                    })
-                    .into()
-                }))
-                .spacing(10),
-                space::vertical(),
-                sticky(container(self.status_bar()).padding(10).style(|theme| {
-                    container::Style::default().background(
-                        gradient::Linear::new(0)
-                            .add_stop(0.7, theme.seed().background)
-                            .add_stop(1.0, Color::TRANSPARENT),
-                    )
-                })),
+                self.repository.review().map(Message::Repository),
+                footer
             ])
             .width(Fill)
             .height(Fill)

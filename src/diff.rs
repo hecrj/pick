@@ -5,11 +5,15 @@ use crate::highlight;
 use iced::border;
 use iced::highlighter;
 use iced::padding;
-use iced::widget::{center, container, rich_text, row, span, text};
-use iced::{Center, Code, Color, Element, Fill, Never, Pixels, Theme};
+use iced::theme::palette;
+use iced::widget::{
+    button, center, center_y, column, container, hover, rich_text, row, space, span, text,
+};
+use iced::{Center, Code, Color, Element, Fill, Font, Never, Pixels, Theme, never};
 
 use similar::{ChangeTag, InlineChangeOptions, TextDiff};
 
+use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,6 +24,7 @@ const INLINE_DEADLINE: Duration = Duration::from_millis(10);
 #[derive(Debug, Clone)]
 pub struct Diff {
     pub lines: Arc<[Line]>,
+    palette: Palette,
 }
 
 impl Diff {
@@ -69,10 +74,33 @@ impl Diff {
             })
             .collect();
 
-        Self { lines }
+        Self { palette, lines }
     }
 
-    pub fn from_hunk(path: &str, hunk: &git::Hunk, background: Color) -> Self {
+    pub fn view(&self) -> impl Iterator<Item = Element<'_, Never>> {
+        self.lines.iter().map(move |line| {
+            container(line.spans())
+                .style(|_theme| {
+                    container::Style::default().background(
+                        line.style
+                            .map(|style| style.gutter)
+                            .unwrap_or(Color::TRANSPARENT),
+                    )
+                })
+                .into()
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Hunk {
+    pub(crate) raw: git::Hunk,
+    diff: Diff,
+    indices: Arc<[Index]>,
+}
+
+impl Hunk {
+    pub fn from_git(path: &str, hunk: &git::Hunk, background: Color) -> Self {
         let old: String = hunk
             .lines
             .iter()
@@ -97,87 +125,222 @@ impl Diff {
             })
             .collect();
 
-        Self::new(path, &old, &new, background)
+        let path = Arc::from(path);
+        let diff = Diff::new(&path, &old, &new, background);
+
+        let indices = {
+            let mut old = hunk.old.start;
+            let mut new = hunk.new.start;
+
+            diff.lines
+                .iter()
+                .map(|line| {
+                    let number = match line.tag {
+                        Tag::Addition => git::Number::New(new),
+                        Tag::Deletion => git::Number::Old(old),
+                        Tag::Context => git::Number::Context(old, new),
+                    };
+
+                    let index = Index {
+                        path: path.clone(),
+                        number,
+                    };
+
+                    match line.tag {
+                        Tag::Context => {
+                            old += 1;
+                            new += 1;
+                        }
+                        Tag::Addition => {
+                            new += 1;
+                        }
+                        Tag::Deletion => {
+                            old += 1;
+                        }
+                    }
+
+                    index
+                })
+                .collect()
+        };
+
+        Self {
+            raw: hunk.clone(),
+            diff,
+            indices,
+        }
     }
 
-    pub fn view(
-        &self,
-        mut start: Option<(usize, usize)>,
-    ) -> impl Iterator<Item = Element<'_, Never>> {
-        self.lines.iter().map(move |line| {
-            let gutter = if let Some((old, new)) = &mut start {
-                let (left, right) = match line.tag {
-                    Tag::Context => (Some(*old), Some(*new)),
-                    Tag::Addition => (None, Some(*new)),
-                    Tag::Deletion => (Some(*old), None),
-                };
-
-                match line.tag {
-                    Tag::Context => {
-                        *old += 1;
-                        *new += 1;
-                    }
-                    Tag::Addition => {
-                        *new += 1;
-                    }
-                    Tag::Deletion => {
-                        *old += 1;
-                    }
-                }
-
-                fn number(n: Option<usize>, line: &Line) -> Element<'_, Never> {
-                    center(n.map(|n| {
-                        text(n)
-                            .size(font::TINY)
-                            .style(move |theme: &Theme| text::Style {
-                                color: if let Tag::Context = line.tag {
-                                    Some(theme.palette().secondary.base.color)
-                                } else {
-                                    None
-                                },
-                            })
-                    }))
-                    .height(20)
-                    .width(40)
-                    .into()
-                }
-
-                Some(row![number(left, line), number(right, line)])
-            } else {
-                None
-            };
-
-            let spans = container(
-                rich_text(line.spans.as_slice())
-                    .wrapping(text::Wrapping::WordOrGlyph)
-                    .size(font::SMALL)
-                    .line_height(Pixels((font::SMALL * 1.75).round())),
-            )
-            .width(Fill)
-            .padding(padding::horizontal(10))
-            .style(|_theme| {
-                container::Style::default().background(
-                    line.style
-                        .map(|style| style.background)
-                        .unwrap_or(Color::TRANSPARENT),
-                )
+    pub fn gutter<'a>(&'a self, content: impl text::IntoFragment<'a>) -> Element<'a, Never> {
+        let content = text(content)
+            .size(font::SMALL)
+            .line_height(Line::HEIGHT)
+            .style(text::secondary)
+            .size(font::SMALL)
+            .font(Font {
+                style: font::Style::Italic,
+                ..Font::MONOSPACE
             });
 
-            container(row![gutter, spans].align_y(Center))
-                .style(|_theme| {
-                    container::Style::default().background(
-                        line.style
-                            .map(|style| style.gutter)
-                            .unwrap_or(Color::TRANSPARENT),
-                    )
-                })
-                .into()
-        })
+        container(
+            row![
+                container(space().width(Line::GUTTER_WIDTH * 2)),
+                container(content)
+                    .padding(padding::horizontal(10))
+                    .width(Fill)
+                    .style(|_theme| container::Style::default()
+                        .background(self.diff.palette.heading.background)),
+            ]
+            .align_y(Center),
+        )
+        .style(|_theme| container::Style::default().background(self.diff.palette.heading.gutter))
+        .into()
+    }
+
+    pub fn view(&self) -> impl Iterator<Item = View<'_>> {
+        self.diff
+            .lines
+            .iter()
+            .zip(self.indices.iter())
+            .map(move |(line, index)| View {
+                line,
+                palette: &self.diff.palette,
+                index,
+            })
+    }
+
+    /// The lines of the hunk, in order
+    pub(crate) fn lines(&self) -> &[Line] {
+        &self.diff.lines
+    }
+
+    /// The last line of the hunk, if any
+    pub(crate) fn last_line(&self) -> Option<&Line> {
+        self.lines().last()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct View<'a> {
+    line: &'a Line,
+    palette: &'a Palette,
+    pub index: &'a Index,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Index {
+    pub path: Arc<str>,
+    pub number: git::Number,
+}
+
+impl fmt::Display for Index {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.path, self.number)
+    }
+}
+
+impl<'a> View<'a> {
+    pub fn view(self) -> Element<'a, Never> {
+        let gutter = self.line.gutter(self.index.number);
+
+        container(row![gutter, self.line.spans()])
+            .style(|_theme| {
+                container::Style::default().background(
+                    self.line
+                        .style
+                        .map(|style| style.gutter)
+                        .unwrap_or_default(),
+                )
+            })
+            .into()
+    }
+
+    pub fn with_action<Message>(self, add: impl Fn(Index) -> Message + 'a) -> Element<'a, Message>
+    where
+        Message: Clone + 'static,
+    {
+        let gutter = self.line.gutter(self.index.number);
+        let line = Element::from(row![gutter, self.line.spans()]).map(never);
+
+        let line = hover(
+            line,
+            center_y(
+                button(
+                    text("+")
+                        .size(font::TITLE)
+                        .line_height(1.0)
+                        .width(Fill)
+                        .height(Fill)
+                        .center(),
+                )
+                .on_press_with(move || add(self.index.clone()))
+                .width(Line::HEIGHT)
+                .height(Line::HEIGHT)
+                .padding(padding::bottom(1))
+                .style(|theme: &Theme, _status| {
+                    let palette = theme.palette();
+
+                    button::Style {
+                        background: Some(self.palette.comment.into()),
+                        text_color: palette.background.base.text,
+                        border: border::rounded(5),
+                        ..button::Style::default()
+                    }
+                }),
+            )
+            .padding(padding::left(Line::GUTTER_WIDTH as f32 * 2.0 - 12.5)),
+        );
+
+        container(line)
+            .style(|_theme| {
+                container::Style::default().background(
+                    self.line
+                        .style
+                        .map(|style| style.gutter)
+                        .unwrap_or_default(),
+                )
+            })
+            .into()
+    }
+
+    pub fn with_decoration<Message: 'static>(
+        self,
+        footer: impl Into<Element<'a, Message>>,
+    ) -> Element<'a, Message> {
+        let gutter = self.line.gutter(self.index.number).map(never);
+
+        let line = row![
+            gutter,
+            column![
+                self.line.spans().map(never),
+                container(footer)
+                    .style(|_theme| {
+                        container::Style::default().background(
+                            self.line
+                                .style
+                                .map(|style| style.background)
+                                .unwrap_or_default(),
+                        )
+                    })
+                    .padding(10)
+            ]
+        ];
+
+        container(line)
+            .style(|_theme| {
+                container::Style::default().background(
+                    self.line
+                        .style
+                        .map(|style| style.gutter)
+                        .unwrap_or_default(),
+                )
+            })
+            .into()
     }
 }
 
 /// A line of the edit diff.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Line {
     /// The tag of the line.
     tag: Tag,
@@ -187,7 +350,7 @@ pub struct Line {
     spans: Vec<text::Span<'static>>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tag {
     Context,
     Addition,
@@ -195,6 +358,9 @@ enum Tag {
 }
 
 impl Line {
+    const HEIGHT: Pixels = Pixels(25.0);
+    const GUTTER_WIDTH: u32 = 40;
+
     fn new<'a>(
         tag: Tag,
         line: &str,
@@ -311,11 +477,71 @@ impl Line {
 
         Self { tag, style, spans }
     }
+
+    /// The full text of the line, including its marker
+    pub(crate) fn text(&self) -> String {
+        let mut text = String::new();
+
+        for span in &self.spans {
+            text.push_str(&span.text);
+        }
+
+        text
+    }
+
+    fn spans(&self) -> Element<'_, Never> {
+        container(
+            rich_text(self.spans.as_slice())
+                .wrapping(text::Wrapping::WordOrGlyph)
+                .size(font::SMALL)
+                .line_height(Self::HEIGHT),
+        )
+        .width(Fill)
+        .padding(padding::horizontal(10))
+        .style(|_theme| {
+            container::Style::default().background(
+                self.style
+                    .map(|style| style.background)
+                    .unwrap_or(Color::TRANSPARENT),
+            )
+        })
+        .into()
+    }
+
+    fn gutter(&self, number: git::Number) -> Element<'_, Never> {
+        row![self.number(number, false), self.number(number, true)].into()
+    }
+
+    fn number(&self, number: git::Number, right: bool) -> Element<'_, Never> {
+        let n = match number {
+            git::Number::Context(old, new) => Some(if right { new } else { old }),
+            git::Number::Old(n) => (!right).then_some(n),
+            git::Number::New(n) => right.then_some(n),
+        };
+
+        center(n.map(|n| {
+            text(n)
+                .size(font::TINY)
+                .style(move |theme: &Theme| text::Style {
+                    color: if let Tag::Context = self.tag {
+                        Some(theme.palette().secondary.base.color)
+                    } else {
+                        None
+                    },
+                })
+        }))
+        .height(Self::HEIGHT)
+        .width(Self::GUTTER_WIDTH)
+        .into()
+    }
 }
 
+#[derive(Debug, Clone)]
 struct Palette {
     addition: Style,
     deletion: Style,
+    heading: Style,
+    comment: Color,
 }
 
 impl Palette {
@@ -325,6 +551,8 @@ impl Palette {
         Self {
             addition: Style::new(background, palette.success),
             deletion: Style::new(background, palette.danger),
+            heading: Style::new(background, palette.primary),
+            comment: palette::darken(palette.primary, 0.3),
         }
     }
 }
@@ -338,8 +566,6 @@ pub struct Style {
 
 impl Style {
     pub fn new(background: Color, accent: Color) -> Self {
-        use iced::theme::palette;
-
         let darkened = palette::darken(accent, 0.3);
 
         Self {

@@ -1,4 +1,5 @@
 use crate::file;
+use crate::git;
 use crate::{Output, Project};
 
 use std::path::{Path, PathBuf};
@@ -334,6 +335,7 @@ pub enum Item {
     Assistant(Reply),
     Tool(ToolRun),
     Compaction(Compaction),
+    Review(Review),
 }
 
 impl Item {
@@ -345,6 +347,7 @@ impl Item {
             Item::Assistant(reply) => ("assistant", reply.encode()),
             Item::Tool(tool_run) => ("tool", tool_run.encode()),
             Item::Compaction(compaction) => ("compaction", compaction.encode()),
+            Item::Review(review) => ("review", review.encode()),
         };
 
         item.tag("item", type_)
@@ -360,6 +363,7 @@ impl Item {
             "assistant" => Self::Assistant(Reply::decode(fields.into_value())?),
             "tool" => Self::Tool(ToolRun::decode(fields.into_value())?),
             "compaction" => Self::Compaction(Compaction::decode(fields.into_value())?),
+            "review" => Self::Review(Review::decode(fields.into_value())?),
             other => return Err(decoder::Error::custom(format!("invalid item: {other}"))),
         })
     }
@@ -602,10 +606,74 @@ impl Compaction {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct Review {
+    pub message: Option<String>,
+    pub comments: Vec<Comment>,
+}
+
+impl Review {
+    fn encode(&self) -> decoder::Map {
+        use decoder::encode::{map, optional, sequence, string};
+
+        map([
+            ("message", optional(string, self.message.as_deref())),
+            ("comments", sequence(comment::encode, &self.comments)),
+        ])
+    }
+
+    fn decode(value: decoder::Value) -> decoder::Result<Self> {
+        use decoder::decode::{map, optional, sequence, string};
+
+        let mut fields = map(value)?;
+
+        Ok(Self {
+            message: fields.required("message", optional(string))?,
+            comments: fields.required("comments", sequence(comment::decode))?,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Comment {
+    pub path: String,
+    pub number: git::Number,
+    pub hunk: git::Hunk,
+    pub content: String,
+}
+
+mod comment {
+    pub fn encode(comment: &super::Comment) -> decoder::Value {
+        use decoder::encode::{map, string};
+
+        map([
+            ("path", string(&comment.path)),
+            ("number", comment.number.encode()),
+            ("hunk", comment.hunk.encode()),
+            ("content", string(&comment.content)),
+        ])
+        .into_value()
+    }
+
+    pub fn decode(value: decoder::Value) -> decoder::Result<super::Comment> {
+        use decoder::decode::{map, string};
+
+        let mut fields = map(value)?;
+
+        Ok(super::Comment {
+            path: fields.required("path", string)?,
+            number: fields.required("number", crate::git::Number::decode)?,
+            hunk: fields.required("hunk", crate::git::Hunk::decode)?,
+            content: fields.required("content", string)?,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use pick_test::Directory;
+    use std::sync::Arc;
     use std::time::Duration;
 
     fn at(secs: u64) -> SystemTime {
@@ -827,6 +895,96 @@ mod tests {
         assert_eq!(compaction.reasoning_tokens, 100);
         assert_eq!(compaction.to, 42);
         assert_eq!(compaction.reply.content, "summary");
+    }
+
+    #[test]
+    fn a_review_item_roundtrips() {
+        let decoded = roundtrip(Frame {
+            event: Event::ItemAdded(Item::Review(Review {
+                message: Some("fix these".to_owned()),
+                comments: vec![
+                    Comment {
+                        path: "src/lib.rs".to_owned(),
+                        number: git::Number::Context(10, 12),
+                        hunk: git::Hunk {
+                            old: git::Range {
+                                start: 10,
+                                count: 1,
+                            },
+                            new: git::Range {
+                                start: 12,
+                                count: 1,
+                            },
+                            heading: None,
+                            lines: Arc::from([git::Line::Context {
+                                old: 10,
+                                new: 12,
+                                text: "fn main() {}".to_owned(),
+                            }]),
+                        },
+                        content: "note the typo".to_owned(),
+                    },
+                    Comment {
+                        path: "src/lib.rs".to_owned(),
+                        number: git::Number::New(123),
+                        hunk: git::Hunk {
+                            old: git::Range {
+                                start: 122,
+                                count: 0,
+                            },
+                            new: git::Range {
+                                start: 123,
+                                count: 1,
+                            },
+                            heading: None,
+                            lines: Arc::from([git::Line::Added {
+                                new: 123,
+                                text: "let x = 1;".to_owned(),
+                            }]),
+                        },
+                        content: "check this".to_owned(),
+                    },
+                    Comment {
+                        path: "src/main.rs".to_owned(),
+                        number: git::Number::Old(7),
+                        hunk: git::Hunk {
+                            old: git::Range { start: 7, count: 1 },
+                            new: git::Range { start: 6, count: 0 },
+                            heading: None,
+                            lines: Arc::from([git::Line::Deleted {
+                                old: 7,
+                                text: "obsolete".to_owned(),
+                            }]),
+                        },
+                        content: "drop this".to_owned(),
+                    },
+                ],
+            })),
+            at: at(1_736_000_007),
+        });
+
+        assert_eq!(decoded.at, at(1_736_000_007));
+
+        let Event::ItemAdded(Item::Review(review)) = decoded.event else {
+            panic!("expected a review item");
+        };
+
+        assert_eq!(review.message.as_deref(), Some("fix these"));
+
+        let [first, second, third] = review.comments.as_slice() else {
+            panic!("expected three comments");
+        };
+
+        assert_eq!(first.path, "src/lib.rs");
+        assert_eq!(first.number, git::Number::Context(10, 12));
+        assert_eq!(first.content, "note the typo");
+
+        assert_eq!(second.number, git::Number::New(123));
+        assert_eq!(second.content, "check this");
+
+        assert_eq!(third.path, "src/main.rs");
+        assert_eq!(third.number, git::Number::Old(7));
+        assert_eq!(third.content, "drop this");
     }
 
     #[test]

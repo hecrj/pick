@@ -62,7 +62,7 @@ impl Call for Edit {
     fn view(&self) -> Option<Element<'_, Never>> {
         Some(
             container(
-                scrollable(column(self.diff.view(None)).width(Fill))
+                scrollable(column(self.diff.view()).width(Fill))
                     .width(Fill)
                     .height(Fit.max(300))
                     .direction(scrollable::Direction::Vertical(
