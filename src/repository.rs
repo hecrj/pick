@@ -8,6 +8,7 @@ use crate::tool;
 use iced::border;
 use iced::keyboard;
 use iced::padding;
+use iced::widget::operation;
 use iced::widget::{
     button, center, column, container, rich_text, right, row, span, sticky, text, text_editor,
 };
@@ -83,9 +84,9 @@ impl Repository {
             }
             Message::Comment(index) => {
                 self.comments
-                    .insert(index, Draft::Writing(text_editor::Content::new()));
+                    .insert(index.clone(), Draft::Writing(text_editor::Content::new()));
 
-                Action::None
+                Action::Run(operation::focus(index.to_string()))
             }
             Message::CommentChanged(index, action) => {
                 let Some(Draft::Writing(content)) = self.comments.get_mut(&index) else {
@@ -456,6 +457,7 @@ impl Draft {
         let comment = match self {
             Draft::Writing(content) => {
                 let comment = text_editor(content)
+                    .id(view.index.to_string())
                     .placeholder("Leave a comment")
                     .padding(10)
                     .height(Fit.min(80))
