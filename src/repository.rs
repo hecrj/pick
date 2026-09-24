@@ -214,7 +214,8 @@ impl Repository {
                 continue;
             };
 
-            // The file, hunk, and line the comment resolves to
+            // The file, hunk, and line the comment resolves to, in
+            // the view it was made in
             let found = self
                 .files
                 .iter()
@@ -228,8 +229,8 @@ impl Repository {
                         .iter()
                         .enumerate()
                         .find_map(|(hunk_index, hunk)| {
-                            hunk.raw
-                                .position(index.number)
+                            hunk.diff
+                                .position(&index)
                                 .map(|position| (file_index, hunk_index, hunk, position))
                         })
                 });
@@ -888,6 +889,71 @@ mod tests {
         for (comment, number) in review.comments.iter().zip(expected) {
             assert_eq!(comment.index.number, number);
         }
+    }
+
+    #[test]
+    fn a_comment_resolves_against_the_displayed_hunk() {
+        // Git and the displayed diff may align a hunk differently.
+        // Here git claims a deletion and an addition of the same
+        // line, while the display sees only context lines
+        let raw = git::Hunk {
+            old: git::Range { start: 1, count: 3 },
+            new: git::Range { start: 1, count: 3 },
+            heading: None,
+            lines: Arc::from([
+                git::Line::Context {
+                    old: 1,
+                    new: 1,
+                    text: "a".into(),
+                },
+                git::Line::Deleted {
+                    old: 2,
+                    text: "a".into(),
+                },
+                git::Line::Added {
+                    new: 2,
+                    text: "a".into(),
+                },
+                git::Line::Context {
+                    old: 3,
+                    new: 3,
+                    text: "a".into(),
+                },
+            ]),
+        };
+
+        let diff = diff::Hunk::from_git(PATH, &raw, tool::BACKGROUND);
+
+        let mut repository = repository(
+            vec![File {
+                raw: git::File {
+                    path: PATH.to_owned(),
+                    original: None,
+                    state: git::State::Modified,
+                    mode_changed: false,
+                    insertions: 1,
+                    deletions: 1,
+                    hunks: Arc::from([raw.clone()]),
+                },
+                hunks: Arc::from([Hunk { raw, diff }]),
+            }],
+            vec![pending(
+                anchor(PATH, git::Number::Context(2, 2)),
+                "a context",
+            )],
+            "",
+        );
+
+        let Some(review) = repository.finish_review() else {
+            unreachable!()
+        };
+
+        let [comment] = &review.comments[..] else {
+            unreachable!()
+        };
+
+        assert_eq!(comment.index.number, git::Number::Context(2, 2));
+        assert_eq!(comment.content.raw(), "a context");
     }
 
     fn comment(path: &str, number: git::Number, line: git::Line, content: &str) -> Comment {

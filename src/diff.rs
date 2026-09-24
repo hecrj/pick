@@ -218,6 +218,11 @@ impl Hunk {
     pub(crate) fn last_line(&self) -> Option<&Line> {
         self.lines().last()
     }
+
+    /// The position of the line with the given index, if any
+    pub(crate) fn position(&self, index: &Index) -> Option<usize> {
+        self.indices.iter().position(|i| i == index)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

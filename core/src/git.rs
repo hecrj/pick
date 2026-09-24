@@ -156,11 +156,16 @@ impl Range {
 
 impl Hunk {
     /// Slices the hunk to the given range of lines, adjusting the
-    /// line ranges to the slice.
+    /// line ranges to the slice, anchoring a side the slice doesn't
+    /// touch to the adjacent line, as in a diff heading.
+    ///
+    /// Panics if the range is out of bounds of the lines.
     pub fn slice(&self, range: std::ops::RangeInclusive<usize>) -> Self {
         use self::Line::*;
 
-        let lines = &self.lines[range];
+        let (start, end) = (*range.start(), *range.end());
+
+        let lines = &self.lines[start..=end];
 
         let (mut old_start, mut new_start) = (None, None);
         let (mut old_count, mut new_count) = (0, 0);
@@ -184,23 +189,54 @@ impl Hunk {
             }
         }
 
+        // The side the slice doesn't touch anchors to the last line
+        // of the side before the slice, or the line before the hunk
+        // when the slice starts at its first line
+        let old_start = old_start.unwrap_or_else(|| {
+            self.lines[..start]
+                .iter()
+                .rev()
+                .find_map(|line| match line {
+                    Context { old, .. } | Deleted { old, .. } => Some(*old),
+                    Added { .. } => None,
+                })
+                .unwrap_or_else(|| {
+                    if self.old.count == 0 {
+                        self.old.start
+                    } else {
+                        self.old.start - 1
+                    }
+                })
+        });
+
+        // The side the slice doesn't touch anchors to the line before
+        // the first line of the side after the slice, or the last
+        // line of the hunk when the slice ends at its last line
+        let new_start = new_start.unwrap_or_else(|| {
+            let after = self.lines[end + 1..].iter().find_map(|line| match line {
+                Context { new, .. } | Added { new, .. } => Some(*new),
+                Deleted { .. } => None,
+            });
+
+            match after {
+                Some(new) => new - 1,
+                None if self.new.count == 0 => self.new.start,
+                None => self.new.start + self.new.count - 1,
+            }
+        });
+
         Self {
             old: Range {
-                start: old_start.unwrap_or_default(),
+                start: old_start,
                 count: old_count,
             },
             new: Range {
-                start: new_start.unwrap_or_default(),
+                start: new_start,
                 count: new_count,
             },
             heading: self.heading.clone(),
             lines: lines.into(),
         }
-    }
-
-    /// The position of the line with the given number, if any
-    pub fn position(&self, number: Number) -> Option<usize> {
-        self.lines.iter().position(|line| line.number() == number)
     }
 
     /// Strips the shared indentation of the lines, if any
@@ -1248,7 +1284,7 @@ mod tests {
     }
 
     #[test]
-    fn position_resolves_the_line_of_a_number() {
+    fn a_slice_missing_a_side_anchors_to_the_adjacent_line() {
         let hunk = Hunk {
             old: Range {
                 start: 10,
@@ -1258,7 +1294,7 @@ mod tests {
                 start: 10,
                 count: 6,
             },
-            heading: Some("fn main".into()),
+            heading: None,
             lines: Arc::from([
                 Line::Context {
                     old: 10,
@@ -1286,11 +1322,91 @@ mod tests {
             ]),
         };
 
-        assert_eq!(hunk.position(Number::Context(10, 10)), Some(0));
-        assert_eq!(hunk.position(Number::Old(12)), Some(2));
-        assert_eq!(hunk.position(Number::New(12)), Some(3));
-        assert_eq!(hunk.position(Number::Context(13, 13)), Some(4));
-        assert_eq!(hunk.position(Number::New(99)), None);
+        // A slice of the added line: the old side anchors to the
+        // deleted line before it
+        let slice = hunk.slice(3..=3);
+
+        assert_eq!(
+            slice.old,
+            Range {
+                start: 12,
+                count: 0
+            }
+        );
+        assert_eq!(
+            slice.new,
+            Range {
+                start: 12,
+                count: 1
+            }
+        );
+
+        // A slice of the deleted line: the new side anchors to the
+        // line before the added line after it
+        let slice = hunk.slice(2..=2);
+
+        assert_eq!(
+            slice.old,
+            Range {
+                start: 12,
+                count: 1
+            }
+        );
+        assert_eq!(
+            slice.new,
+            Range {
+                start: 11,
+                count: 0
+            }
+        );
+    }
+
+    #[test]
+    fn a_slice_at_the_hunk_edge_anchors_to_the_hunk_bound() {
+        // The hunk starts at the first line of the file
+        let hunk = Hunk {
+            old: Range { start: 1, count: 1 },
+            new: Range { start: 1, count: 2 },
+            heading: None,
+            lines: Arc::from([
+                Line::Added {
+                    new: 1,
+                    text: "a".into(),
+                },
+                Line::Context {
+                    old: 1,
+                    new: 2,
+                    text: "b".into(),
+                },
+            ]),
+        };
+
+        let slice = hunk.slice(0..=0);
+
+        assert_eq!(slice.old, Range { start: 0, count: 0 });
+        assert_eq!(slice.new, Range { start: 1, count: 1 });
+
+        // A hunk of pure additions anchors to its own start
+        let hunk = Hunk {
+            old: Range { start: 5, count: 0 },
+            new: Range { start: 6, count: 2 },
+            heading: None,
+            lines: Arc::from([
+                Line::Added {
+                    new: 6,
+                    text: "a".into(),
+                },
+                Line::Added {
+                    new: 7,
+                    text: "b".into(),
+                },
+            ]),
+        };
+
+        let slice = hunk.slice(0..=1);
+
+        assert_eq!(slice.old, Range { start: 5, count: 0 });
+        assert_eq!(slice.new, Range { start: 6, count: 2 });
     }
 
     #[test]
