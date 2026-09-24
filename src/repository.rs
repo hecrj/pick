@@ -6,11 +6,12 @@ use crate::markdown::{self, Markdown};
 use crate::tool;
 
 use iced::border;
+use iced::keyboard;
 use iced::padding;
 use iced::widget::{
     button, center, column, container, rich_text, right, row, span, sticky, text, text_editor,
 };
-use iced::{Center, Element, Fill, Fit, Font, Task, Theme, never};
+use iced::{Bottom, Center, Element, Fill, Fit, Font, Task, Theme, never};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,6 +33,8 @@ pub enum Message {
     CancelComment(diff::Index),
     SendComment(diff::Index),
     AddToReview(diff::Index),
+    ReviewChanged(text_editor::Action),
+    SendReview,
     LinkClicked(markdown::Uri),
 }
 
@@ -127,6 +130,18 @@ impl Repository {
                 *comment = Draft::Pending(Markdown::new(content.text().trim()));
 
                 Action::None
+            }
+            Message::ReviewChanged(action) => {
+                self.review.perform(action);
+
+                Action::None
+            }
+            Message::SendReview => {
+                let Some(review) = self.finish_review() else {
+                    return Action::None;
+                };
+
+                Action::Review(review)
             }
             Message::LinkClicked(uri) => {
                 dbg!(uri); // TODO
@@ -283,6 +298,41 @@ impl Repository {
             message,
             comments: Arc::from(comments),
         })
+    }
+
+    /// The review's message input, while a review is being written
+    pub fn message(&self) -> Option<Element<'_, Message>> {
+        if !self.is_reviewing() {
+            return None;
+        }
+
+        let editor = text_editor(&self.review)
+            .id("review")
+            .placeholder("Leave a review")
+            .padding(10)
+            .on_action(Message::ReviewChanged)
+            .key_binding(|key_press| {
+                if key_press.is_focused
+                    && key_press.key == keyboard::Key::Named(keyboard::key::Named::Enter)
+                    && !key_press.modifiers.shift()
+                {
+                    return Some(text_editor::Binding::Custom(Message::SendReview));
+                }
+
+                text_editor::Binding::from_key_press(key_press)
+            });
+
+        let control = button(text("Send").font(Font::DEFAULT))
+            .padding(10)
+            .style(button::success)
+            .on_press(Message::SendReview);
+
+        Some(
+            row![container(editor).width(Fill), control]
+                .spacing(10)
+                .align_y(Bottom)
+                .into(),
+        )
     }
 
     pub fn review(&self) -> Element<'_, Message> {

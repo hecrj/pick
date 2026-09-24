@@ -312,36 +312,55 @@ impl Item {
                 .style(container::bordered_box)
                 .into()
             }
-            Item::Review(review) => column(review.comments.iter().map(|comment| {
-                let header = {
-                    let label = container(text("review").size(font::SMALL))
-                        .padding([2, 5])
-                        .style(container::dark);
-
-                    let title = text(comment.index.to_string()).size(font::SMALL);
-
-                    row![label, title].spacing(10).padding(10).align_y(Center)
-                };
-
-                container(column![
-                    header,
-                    container(
-                        Element::from(column(comment.hunk.view().map(diff::View::view))).map(never)
+            Item::Review(review) => {
+                let message = review.message.as_ref().map(|message| {
+                    right(
+                        container(
+                            markdown::view(message.items(), Font::DEFAULT, font::NORMAL)
+                                .map(Message::LinkClicked),
+                        )
+                        .padding(10)
+                        .style(container::rounded_box),
                     )
-                    .style(|_theme| { container::Style::default().background(tool::BACKGROUND) }),
-                    container(
-                        markdown::view(comment.content.items(), Font::DEFAULT, font::NORMAL)
-                            .map(Message::LinkClicked)
-                    )
-                    .padding(10),
-                ])
-                .width(Fill)
-                .padding(1)
-                .style(container::bordered_box)
-                .into()
-            }))
-            .spacing(10)
-            .into(),
+                    .into()
+                });
+
+                let comments = review.comments.iter().map(|comment| {
+                    let header = {
+                        let label = container(text("review").size(font::SMALL))
+                            .padding([2, 5])
+                            .style(container::dark);
+
+                        let title = text(comment.index.to_string()).size(font::SMALL);
+
+                        row![label, title].spacing(10).padding(10).align_y(Center)
+                    };
+
+                    container(column![
+                        header,
+                        container(
+                            Element::from(column(comment.hunk.view().map(diff::View::view)))
+                                .map(never),
+                        )
+                        .style(|_theme| {
+                            container::Style::default().background(tool::BACKGROUND)
+                        }),
+                        container(
+                            markdown::view(comment.content.items(), Font::DEFAULT, font::NORMAL)
+                                .map(Message::LinkClicked),
+                        )
+                        .padding(10),
+                    ])
+                    .width(Fill)
+                    .padding(1)
+                    .style(container::bordered_box)
+                    .into()
+                });
+
+                column(message.into_iter().chain(comments))
+                    .spacing(10)
+                    .into()
+            }
             Item::Compaction(compaction) => {
                 let notice = center_x(text(if compaction.is_finished {
                     format!("Compacted into {} tokens", compaction.tokens)

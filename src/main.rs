@@ -821,13 +821,25 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
     }
 
     fn review(&self) -> Element<'_, Message> {
-        let footer = sticky(container(self.status_bar()).padding(10).style(|theme| {
-            container::Style::default().background(
-                gradient::Linear::new(0)
-                    .add_stop(0.7, theme.seed().background)
-                    .add_stop(1.0, Color::TRANSPARENT),
+        let footer = sticky(
+            container(
+                column![
+                    self.repository
+                        .message()
+                        .map(|message| message.map(Message::Repository)),
+                    self.status_bar(),
+                ]
+                .spacing(10),
             )
-        }));
+            .padding(10)
+            .style(|theme| {
+                container::Style::default().background(
+                    gradient::Linear::new(0)
+                        .add_stop(0.9, theme.seed().background.scale_alpha(0.9))
+                        .add_stop(1.0, Color::TRANSPARENT),
+                )
+            }),
+        );
 
         container(
             scrollable(column![
