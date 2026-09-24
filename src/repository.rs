@@ -12,14 +12,14 @@ use iced::widget::operation;
 use iced::widget::{
     button, center, column, container, rich_text, right, row, span, sticky, text, text_editor,
 };
-use iced::{Bottom, Center, Element, Fill, Fit, Font, Task, Theme, never};
+use iced::{Background, Bottom, Center, Element, Fill, Fit, Font, Task, Theme, never};
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 pub struct Repository {
     project: Project,
-    pub status: Option<git::Status>,
+    status: Option<git::Status>,
     files: Vec<File>,
     comments: HashMap<diff::Index, Draft>,
     review: text_editor::Content,
@@ -37,6 +37,7 @@ pub enum Message {
     ReviewChanged(text_editor::Action),
     SendReview,
     LinkClicked(markdown::Uri),
+    ToggleReview,
 }
 
 #[derive(Debug)]
@@ -44,6 +45,7 @@ pub enum Action {
     None,
     Run(Task<Message>),
     Review(Review),
+    ToggleReview,
 }
 
 impl Repository {
@@ -149,6 +151,7 @@ impl Repository {
 
                 Action::None
             }
+            Message::ToggleReview => Action::ToggleReview,
         }
     }
 
@@ -334,6 +337,58 @@ impl Repository {
                 .align_y(Bottom)
                 .into(),
         )
+    }
+
+    pub fn summary(&self) -> Option<Element<'_, Message>> {
+        let status = self.status.as_ref()?;
+
+        let branch = match &status.branch {
+            git::Branch::Unborn(name) | git::Branch::Named(name) => text!("@ {name}"),
+            git::Branch::Detached(_sha) => text("@ detached HEAD").style(text::warning),
+        }
+        .size(font::SMALL);
+
+        let changes = row![
+            text!("+{}", status.additions)
+                .size(font::SMALL)
+                .style(text::success),
+            text!("-{}", status.deletions)
+                .size(font::SMALL)
+                .style(text::danger),
+            (!status.untracked.is_empty()).then(|| {
+                text!("({})", status.untracked.len())
+                    .size(font::TINY)
+                    .font(Font {
+                        style: font::Style::Italic,
+                        ..Font::MONOSPACE
+                    })
+            }),
+        ]
+        .spacing(5)
+        .align_y(Center);
+
+        let review = button(changes)
+            .on_press(Message::ToggleReview)
+            .padding([0, 2])
+            .style(|theme, status| {
+                let palette = theme.palette();
+
+                let color = match status {
+                    button::Status::Active => None,
+                    button::Status::Hovered => Some(palette.background.weaker.color),
+                    button::Status::Pressed => Some(palette.background.strong.color),
+                    button::Status::Disabled => None,
+                };
+
+                button::Style {
+                    background: color.map(Background::from),
+                    border: border::rounded(2),
+                    text_color: palette.background.base.text,
+                    ..button::Style::default()
+                }
+            });
+
+        Some(row![branch, review].spacing(8).into())
     }
 
     pub fn review(&self) -> Element<'_, Message> {
@@ -562,7 +617,7 @@ impl Review {
         }
 
         for comment in self.comments.iter() {
-            let Some(line) = comment.hunk.last_line() else {
+            let Some(line) = comment.hunk.lines().last() else {
                 continue;
             };
 
@@ -804,9 +859,9 @@ mod tests {
         assert_eq!(second.hunk.lines().len(), 3);
         assert_eq!(third.hunk.lines().len(), 3);
 
-        assert_eq!(first.hunk.last_line().unwrap().text(), "  b");
-        assert_eq!(second.hunk.last_line().unwrap().text(), "  e");
-        assert_eq!(third.hunk.last_line().unwrap().text(), "  p");
+        assert_eq!(first.hunk.lines().last().unwrap().text(), "  b");
+        assert_eq!(second.hunk.lines().last().unwrap().text(), "  e");
+        assert_eq!(third.hunk.lines().last().unwrap().text(), "  p");
 
         // The comments keep their content
         assert_eq!(first.content.raw(), "close one");
@@ -860,7 +915,7 @@ mod tests {
         };
 
         assert_eq!(comment.index.number, git::Number::Old(3));
-        assert_eq!(comment.hunk.last_line().unwrap().text(), "- c");
+        assert_eq!(comment.hunk.lines().last().unwrap().text(), "- c");
     }
 
     #[test]

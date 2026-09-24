@@ -10,7 +10,6 @@ mod repository;
 mod tool;
 mod widget;
 
-use crate::core::git;
 use crate::core::sandbox;
 use crate::core::session;
 use crate::core::{Project, Session};
@@ -21,17 +20,14 @@ use crate::markdown::Markdown;
 use crate::repository::Repository;
 use crate::tool::Tool;
 
-use iced::border;
 use iced::gradient;
 use iced::keyboard;
 use iced::padding;
 use iced::task;
 use iced::time;
 use iced::widget::operation;
-use iced::widget::{
-    button, center, column, container, row, scrollable, space, sticky, text, text_editor,
-};
-use iced::{Background, Center, Color, Element, Fill, Fit, Subscription, Task, Theme};
+use iced::widget::{center, column, container, row, scrollable, space, sticky, text, text_editor};
+use iced::{Center, Color, Element, Fill, Fit, Subscription, Task, Theme};
 use iced_palace::widget::typewriter;
 
 use function::Binary;
@@ -170,7 +166,6 @@ enum Message {
     ToolFinished(reason::tool::Id, Result<tool::Output, reason::Error>),
     Item(usize, item::Message),
     Abort,
-    ToggleReviewMode(bool),
     Repository(repository::Message),
 }
 
@@ -494,16 +489,6 @@ impl Pick {
 
                 Task::none()
             }
-            Message::ToggleReviewMode(true) => {
-                self.mode = Mode::Review;
-
-                self.repository.diff().map(Message::Repository)
-            }
-            Message::ToggleReviewMode(false) => {
-                self.mode = Mode::Chat;
-
-                operation::snap_to_end("scroll", operation::Animation::Instant)
-            }
             Message::Repository(message) => match self.repository.update(message) {
                 repository::Action::None => Task::none(),
                 repository::Action::Run(task) => task.map(Message::Repository),
@@ -518,6 +503,17 @@ impl Pick {
                         operation::snap_to_end("scroll", operation::Animation::Instant),
                         self.work(),
                     ])
+                }
+                repository::Action::ToggleReview => {
+                    if matches!(self.mode, Mode::Review) {
+                        self.mode = Mode::Chat;
+
+                        operation::snap_to_end("scroll", operation::Animation::Instant)
+                    } else {
+                        self.mode = Mode::Review;
+
+                        self.repository.diff().map(Message::Repository)
+                    }
                 }
             },
         }
@@ -944,58 +940,10 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
     }
 
     fn status_bar(&self) -> Element<'_, Message> {
-        let repository = self.repository.status.as_ref().map(|status| {
-            let branch = match &status.branch {
-                git::Branch::Unborn(name) | git::Branch::Named(name) => text!("@ {name}"),
-                git::Branch::Detached(_sha) => text("@ detached HEAD").style(text::warning),
-            }
-            .size(font::SMALL);
-
-            let changes = row![
-                text!("+{}", status.additions)
-                    .size(font::SMALL)
-                    .style(text::success),
-                text!("-{}", status.deletions)
-                    .size(font::SMALL)
-                    .style(text::danger),
-                (!status.untracked.is_empty()).then(|| {
-                    text!("({})", status.untracked.len())
-                        .size(font::TINY)
-                        .font(Font {
-                            style: font::Style::Italic,
-                            ..Font::MONOSPACE
-                        })
-                }),
-            ]
-            .spacing(5)
-            .align_y(Center);
-
-            let review = button(changes)
-                .on_press(Message::ToggleReviewMode(!matches!(
-                    self.mode,
-                    Mode::Review
-                )))
-                .padding([0, 2])
-                .style(|theme, status| {
-                    let palette = theme.palette();
-
-                    let color = match status {
-                        button::Status::Active => None,
-                        button::Status::Hovered => Some(palette.background.weaker.color),
-                        button::Status::Pressed => Some(palette.background.strong.color),
-                        button::Status::Disabled => None,
-                    };
-
-                    button::Style {
-                        background: color.map(Background::from),
-                        border: border::rounded(2),
-                        text_color: palette.background.base.text,
-                        ..button::Style::default()
-                    }
-                });
-
-            row![branch, review].spacing(8)
-        });
+        let repository = self
+            .repository
+            .summary()
+            .map(|summary| summary.map(Message::Repository));
 
         let server = {
             let timings = self.timings();

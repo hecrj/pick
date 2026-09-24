@@ -179,7 +179,7 @@ impl repository::Comment {
         session::Comment {
             path: self.index.path.to_string(),
             number: self.index.number,
-            hunk: self.hunk.raw.clone(),
+            hunk: self.hunk.raw().clone(),
             content: self.content.raw().to_owned(),
         }
     }
@@ -262,12 +262,12 @@ mod tests {
         assert_eq!(first.content.raw(), "check this");
 
         // The hunk is recreated from the persisted lines
-        assert_eq!(first.hunk.raw, first_hunk);
+        assert_eq!(first.hunk.raw(), &first_hunk);
 
         assert_eq!(second.index.path.as_ref(), "src/main.rs");
         assert_eq!(second.index.number, git::Number::Old(7));
         assert_eq!(second.content.raw(), "drop this");
 
-        assert_eq!(second.hunk.raw, second_hunk);
+        assert_eq!(second.hunk.raw(), &second_hunk);
     }
 }

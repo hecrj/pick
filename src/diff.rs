@@ -94,7 +94,7 @@ impl Diff {
 
 #[derive(Debug, Clone)]
 pub struct Hunk {
-    pub(crate) raw: git::Hunk,
+    raw: git::Hunk,
     diff: Diff,
     indices: Arc<[Index]>,
 }
@@ -171,6 +171,10 @@ impl Hunk {
         }
     }
 
+    pub fn raw(&self) -> &git::Hunk {
+        &self.raw
+    }
+
     pub fn gutter<'a>(&'a self, content: impl text::IntoFragment<'a>) -> Element<'a, Never> {
         let content = text(content)
             .size(font::SMALL)
@@ -210,13 +214,8 @@ impl Hunk {
     }
 
     /// The lines of the hunk, in order
-    pub(crate) fn lines(&self) -> &[Line] {
+    pub fn lines(&self) -> &[Line] {
         &self.diff.lines
-    }
-
-    /// The last line of the hunk, if any
-    pub(crate) fn last_line(&self) -> Option<&Line> {
-        self.lines().last()
     }
 
     /// The position of the line with the given index, if any
