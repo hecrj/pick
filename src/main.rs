@@ -3,6 +3,7 @@ use pick_core as core;
 mod diff;
 mod font;
 mod highlight;
+mod html;
 mod item;
 mod locale;
 mod markdown;
@@ -36,6 +37,7 @@ use reason::model;
 
 use std::collections::{BTreeMap, HashMap};
 use std::env;
+use std::path::{Path, PathBuf};
 
 /// The flag that runs the app without the bubblewrap sandbox.
 const LIVE: &str = "--we-doin-it-live";
@@ -43,6 +45,18 @@ const LIVE: &str = "--we-doin-it-live";
 /// The flag that resumes a session instead of starting a fresh
 /// one: the newest, or the one at the path that follows it.
 const RESUME: &str = "--resume";
+
+/// The flag that exports a session as a standalone HTML
+/// document instead of running the app: the newest session,
+/// or the one at the path that follows the flag.
+const EXPORT_HTML: &str = "--export-html";
+
+/// The flag that selects the output file of `--export-html`.
+const OUTPUT: &str = "-o";
+
+/// The flag that opens the exported document in the default
+/// browser.
+const OPEN: &str = "--open";
 
 /// The maximum width of the content area
 const MAX_CONTENT_WIDTH: u32 = 770;
@@ -73,6 +87,29 @@ fn main() -> Result<(), iced::Error> {
         .cloned();
 
     let project = Project::current_dir().expect("the current directory must be resolvable");
+
+    // `--export-html [PATH]` exports a session as a standalone
+    // HTML document and exits, before the sandbox and the app.
+    if args.iter().any(|arg| arg.as_str() == EXPORT_HTML) {
+        let session_path = args
+            .iter()
+            .position(|arg| arg.as_str() == EXPORT_HTML)
+            .and_then(|i| args.get(i + 1))
+            .filter(|arg| !arg.starts_with('-'))
+            .cloned();
+
+        let output = args
+            .iter()
+            .position(|arg| arg.as_str() == OUTPUT)
+            .and_then(|i| args.get(i + 1))
+            .cloned();
+
+        let open = args.iter().any(|arg| arg.as_str() == OPEN);
+
+        export(&project, session_path.as_deref(), output.as_deref(), open);
+
+        return Ok(());
+    }
 
     // Re-execute under a sandbox, panicking when that is
     // not possible; `--we-doin-it-live` skips the sandbox.
@@ -110,6 +147,77 @@ fn main() -> Result<(), iced::Error> {
     .theme(Theme::CatppuccinMocha)
     .font(Font::MONOSPACE)
     .run()
+}
+
+/// Exports the session at `session_path`, or the newest session
+/// when the path is left out, as a standalone HTML document at
+/// `output`, or beside the session's file when it is left out;
+/// exits on failure.
+fn export(project: &Project, session_path: Option<&str>, output: Option<&str>, open: bool) {
+    let file = match session_path {
+        Some(path) => session::File::existing(project, path).unwrap_or_else(|| {
+            eprintln!("no such session: {path}");
+            std::process::exit(1);
+        }),
+        None => session::File::latest(project).unwrap_or_else(|| {
+            eprintln!("no sessions found");
+            std::process::exit(1);
+        }),
+    };
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("a current-thread runtime builds");
+
+    let session = runtime
+        .block_on(Session::load(&file))
+        .unwrap_or_else(|error| {
+            eprintln!("failed to load session: {error}");
+            std::process::exit(1);
+        });
+
+    let output = match output {
+        Some(output) => PathBuf::from(output),
+        None => file.as_ref().with_extension("html"),
+    };
+
+    let document = html::export(&session, &Theme::CatppuccinMocha);
+
+    std::fs::write(&output, document).unwrap_or_else(|error| {
+        eprintln!("failed to write {}: {error}", output.display());
+        std::process::exit(1);
+    });
+
+    println!("exported: {}", output.display());
+
+    if open {
+        open_document(&output);
+    }
+}
+
+/// Opens the document in the default browser; exits on failure.
+fn open_document(path: &Path) {
+    let mut command = if cfg!(target_os = "macos") {
+        std::process::Command::new("open")
+    } else if cfg!(target_os = "windows") {
+        std::process::Command::new("cmd")
+    } else {
+        std::process::Command::new("xdg-open")
+    };
+
+    if cfg!(target_os = "windows") {
+        // The empty title argument keeps `start` from treating a
+        // quoted path as the window's title.
+        command.args(["/c", "start", ""]);
+        command.arg(path.display().to_string());
+    } else {
+        command.arg(path);
+    }
+
+    if let Err(error) = command.spawn() {
+        eprintln!("failed to open {}: {error}", path.display());
+        std::process::exit(1);
+    }
 }
 
 struct Pick {

@@ -422,7 +422,7 @@ pub struct Compaction {
     pub is_finished: bool,
 }
 
-fn duration(duration: time::Duration) -> String {
+pub(crate) fn duration(duration: time::Duration) -> String {
     let seconds = duration.as_secs_f64();
 
     if seconds < 1.0 {
