@@ -69,7 +69,7 @@ impl Tool {
                         required: true,
                     },
                     Parameter {
-                        name: "title",
+                        name: "description",
                         description: "A short 3-5 word summary of the command",
                         schema: Schema::String,
                         required: false,
@@ -185,7 +185,7 @@ impl Tool {
             parse: Box::new(move |json| match serde_json::from_str::<C>(json) {
                 Ok(call) => Ok(Box::new(call)),
                 Err(error) => {
-                    log::error!("tool arguments failed to parse: {error}");
+                    log::warn!("tool arguments failed to parse: {error}");
 
                     Err(std::io::Error::other(format!(
                         "tool arguments failed to parse: {error}"

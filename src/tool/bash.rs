@@ -35,7 +35,7 @@ pub struct Bash {
 #[derive(Deserialize)]
 struct Arguments {
     command: String,
-    #[serde(default)]
+    #[serde(default, rename = "description")]
     title: Option<String>,
 }
 

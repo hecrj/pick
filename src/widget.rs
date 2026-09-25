@@ -2,8 +2,8 @@ use crate::font;
 use crate::locale;
 
 use iced::widget::operation;
-use iced::widget::{container, scrollable, text};
-use iced::{Element, Theme};
+use iced::widget::{Component, button, column, component, container, scrollable, text};
+use iced::{Element, Renderer, Theme};
 
 pub fn snap<Message>(
     animation: operation::Animation,
@@ -33,7 +33,14 @@ pub fn snap<Message>(
         return scrollable::Action::None;
     }
 
-    scrollable::Action::ScrollTo(scroll.viewport.end().into(), animation)
+    scrollable::Action::ScrollTo(
+        scroll.viewport.end().into(),
+        if destination.distance_to_end().y > 2000.0 {
+            operation::Animation::Instant
+        } else {
+            animation
+        },
+    )
 }
 
 pub fn context_led<'a, Message: 'a>(
@@ -163,4 +170,68 @@ pub fn context_led<'a, Message: 'a>(
         }
         _ => led.into(),
     }
+}
+
+pub fn collapsible<'a, Message, A, B>(
+    base: impl Fn(bool) -> A + 'a,
+    content: impl Fn() -> B + 'a,
+) -> Element<'a, Message>
+where
+    Message: Clone + 'static,
+    A: Into<Element<'a, Message>>,
+    B: Into<Element<'a, Message>>,
+{
+    struct Collapsible<'a, Message> {
+        base: Box<dyn Fn(bool) -> Element<'a, Message> + 'a>,
+        content: Box<dyn Fn() -> Element<'a, Message> + 'a>,
+    }
+
+    #[derive(Debug, Clone)]
+    enum Event<Message> {
+        Toggle(bool),
+        Custom(Message),
+    }
+
+    impl<'a, Message> Component<'a, Message> for Collapsible<'a, Message>
+    where
+        Message: Clone + 'static,
+    {
+        type State = bool;
+        type Event = Event<Message>;
+
+        fn update(
+            &self,
+            state: &mut Self::State,
+            event: Self::Event,
+            _renderer: &Renderer,
+        ) -> Option<Message> {
+            match event {
+                Event::Toggle(open) => {
+                    *state = open;
+                    None
+                }
+                Event::Custom(message) => Some(message),
+            }
+        }
+
+        fn view(&self, open: &bool) -> Element<'a, Self::Event> {
+            column![
+                button((self.base)(*open).map(Event::Custom),)
+                    .on_press(Event::Toggle(!*open))
+                    .padding(0)
+                    .style(|theme, _status| button::Style {
+                        text_color: theme.seed().text,
+                        ..button::Style::default()
+                    }),
+                open.then(&self.content)
+                    .map(|content| content.map(Event::Custom))
+            ]
+            .into()
+        }
+    }
+
+    component(Collapsible {
+        base: Box::new(move |open| base(open).into()),
+        content: Box::new(move || content().into()),
+    })
 }

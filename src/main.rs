@@ -26,8 +26,10 @@ use iced::padding;
 use iced::task;
 use iced::time;
 use iced::widget::operation;
-use iced::widget::{center, column, container, row, scrollable, space, sticky, text, text_editor};
-use iced::{Center, Color, Element, Fill, Fit, Subscription, Task, Theme};
+use iced::widget::{
+    center, column, container, row, rule, scrollable, space, sticky, text, text_editor, toggler,
+};
+use iced::{Center, Color, Element, Fill, Fit, Shrink, Subscription, Task, Theme};
 use iced_palace::widget::typewriter;
 
 use function::Binary;
@@ -127,6 +129,7 @@ struct Pick {
     input: text_editor::Content,
     mode: Mode,
     heartbeats: usize,
+    compact: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -167,6 +170,7 @@ enum Message {
     Item(usize, item::Message),
     Abort,
     Repository(repository::Message),
+    ToggleCompact(bool),
 }
 
 impl Pick {
@@ -194,6 +198,7 @@ impl Pick {
                 .unwrap_or_default(),
             mode: Mode::Chat,
             heartbeats: 0,
+            compact: true,
         };
 
         let boot = {
@@ -413,7 +418,7 @@ impl Pick {
                     return Task::none();
                 };
 
-                let item::Status::Running { logs } = &mut tool.status else {
+                let item::Status::Running { logs, .. } = &mut tool.status else {
                     return Task::none();
                 };
 
@@ -516,6 +521,11 @@ impl Pick {
                     }
                 }
             },
+            Message::ToggleCompact(compact) => {
+                self.compact = compact;
+
+                Task::none()
+            }
         }
     }
 
@@ -621,7 +631,13 @@ impl Pick {
                 self.tasks
                     .insert(Work::Tool(call.id.clone()), handle.abort_on_drop());
 
-                (run, item::Status::Running { logs: Vec::new() })
+                (
+                    run,
+                    item::Status::Running {
+                        logs: Vec::new(),
+                        started_at: time::Instant::now(),
+                    },
+                )
             }
             Err(_error) => (Task::none(), item::Status::Invalid),
         };
@@ -894,7 +910,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                 "Just say the word.",
             ];
 
-            center(
+            return center(
                 column![
                     typewriter(TITLES[(self.heartbeats / 6) % TITLES.len()])
                         .size(font::TITLE)
@@ -908,35 +924,38 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                 .width(Fit.max(MAX_CONTENT_WIDTH as f32 * 0.7)),
             )
             .padding([0, 10])
-            .into()
-        } else {
-            container(
-                scrollable(center(
-                    column![
-                        column(
-                            self.messages
-                                .iter()
-                                .map(|item| item.view(&self.project))
-                                .enumerate()
-                                .map(|(i, item)| item.map(Message::Item.with(i))),
-                        )
-                        .spacing(20)
-                        .padding(padding::top(10)),
-                        space::vertical(),
-                        sticky(footer),
-                    ]
-                    .width(Fit.max(MAX_CONTENT_WIDTH)),
-                ))
-                .id("scroll")
-                .width(Fill)
-                .height(Fill)
-                .on_scroll(widget::snap.with(operation::Animation::Auto))
-                .spacing(20)
-                .padding(10),
-            )
-            .padding([0, 10])
-            .into()
+            .into();
         }
+
+        container(
+            scrollable(center(
+                column![
+                    if self.compact {
+                        column(
+                            self.turns()
+                                .map(|turn| turn.view(&self.project, &self.messages)),
+                        )
+                    } else {
+                        column(self.messages.iter().enumerate().map(|(i, item)| {
+                            item.view(&self.project, false).map(Message::Item.with(i))
+                        }))
+                    }
+                    .spacing(20)
+                    .padding(padding::top(10)),
+                    space::vertical(),
+                    sticky(footer),
+                ]
+                .width(Fit.max(MAX_CONTENT_WIDTH)),
+            ))
+            .id("scroll")
+            .width(Fill)
+            .height(Fill)
+            .on_scroll(widget::snap.with(operation::Animation::Auto))
+            .spacing(20)
+            .padding(10),
+        )
+        .padding([0, 10])
+        .into()
     }
 
     fn status_bar(&self) -> Element<'_, Message> {
@@ -999,6 +1018,11 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
         row![
             text(self.project.to_string()).size(font::SMALL),
             repository,
+            toggler(self.compact)
+                .label("Compact")
+                .size(font::TINY)
+                .text_size(font::SMALL)
+                .on_toggle(Message::ToggleCompact),
             space::horizontal(),
             server,
         ]
@@ -1090,5 +1114,160 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                 None
             }
         })
+    }
+
+    fn turns(&self) -> impl Iterator<Item = Turn> {
+        let mut items = self.messages.iter().enumerate().peekable();
+
+        std::iter::from_fn(move || {
+            let (i, item) = items.next()?;
+
+            Some(match item {
+                Item::User(_) | Item::Review(_) | Item::Compaction(_) => Turn::Standalone(i),
+                Item::Assistant(reply) if !reply.content.is_empty() => Turn::Standalone(i),
+                Item::Assistant(_) | Item::Tool(_) => {
+                    let mut end = i + 1;
+
+                    while let Some((_, next)) = items.peek() {
+                        match next {
+                            Item::User(_) | Item::Review(_) | Item::Compaction(_) => break,
+                            Item::Assistant(reply) if !reply.content.is_empty() => {
+                                end += 1;
+                                break;
+                            }
+                            _ => {}
+                        }
+
+                        end += 1;
+
+                        let _ = items.next();
+                    }
+
+                    Turn::Work { start: i, end }
+                }
+            })
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Turn {
+    Standalone(usize),
+    Work { start: usize, end: usize },
+}
+
+impl Turn {
+    fn view<'a>(self, project: &'a Project, messages: &'a [Item]) -> Element<'a, Message> {
+        match self {
+            Turn::Standalone(i) => messages[i].view(project, true).map(Message::Item.with(i)),
+            Turn::Work { start, end } => {
+                let mut reasoning = time::Duration::ZERO;
+                let mut commands = 0;
+                let mut reads = 0;
+                let mut edits = 0;
+                let mut writes = 0;
+
+                for item in &messages[start..end] {
+                    match item {
+                        Item::Assistant(reply) if let Some(timings) = reply.timings => {
+                            reasoning += timings.reasoning;
+                        }
+                        Item::Tool(run) => match run.call.name.as_str() {
+                            "bash" => commands += 1,
+                            "read" => reads += 1,
+                            "edit" => edits += 1,
+                            "write" => writes += 1,
+                            _ => {}
+                        },
+                        _ => {}
+                    }
+                }
+
+                let inflect = |word: &str, count| {
+                    if count == 1 {
+                        word.to_owned()
+                    } else {
+                        format!("{word}s")
+                    }
+                };
+
+                let mut summary = [
+                    (commands > 0)
+                        .then(|| format!("ran {commands} {}", inflect("command", commands))),
+                    (reads > 0).then(|| format!("read {reads} {}", inflect("file", reads))),
+                    (edits > 0).then(|| format!("edited {edits} {}", inflect("file", edits))),
+                    (writes > 0).then(|| format!("wrote {writes} {}", inflect("file", writes))),
+                    (reasoning > time::Duration::ZERO)
+                        .then(|| format!("thought for {}", item::duration(reasoning))),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(", ");
+
+                let capital = summary.ceil_char_boundary(1);
+                let c = summary[..capital].to_uppercase();
+                summary.replace_range(..capital, &c);
+
+                let collapsible = widget::collapsible(
+                    move |open| {
+                        container(
+                            text!("{}  {}", if open { "▾" } else { "▸" }, summary.clone())
+                                .size(font::SMALL)
+                                .font(font::BOLD),
+                        )
+                        .width(Fill)
+                        .padding(10)
+                        .style(container::bordered_box)
+                    },
+                    move || {
+                        row![
+                            rule::vertical(2).style(rule::weak),
+                            column(messages[start..end].iter().enumerate().filter_map(
+                                |(i, item)| {
+                                    Some(match item {
+                                        Item::Assistant(reply) => item::reasoning(reply)
+                                            .map(Message::Item.with(start + i)),
+                                        Item::Tool(_) => item
+                                            .view(project, true)
+                                            .map(Message::Item.with(start + i)),
+                                        _ => return None,
+                                    })
+                                }
+                            ))
+                            .padding(padding::top(20))
+                            .spacing(20)
+                        ]
+                        .padding(padding::left(20))
+                        .spacing(20)
+                        .height(Shrink)
+                    },
+                );
+
+                let running_tools =
+                    messages[start..end]
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, item)| {
+                            let Item::Tool(item::ToolRun {
+                                status: item::Status::Running { started_at, .. },
+                                ..
+                            }) = item
+                            else {
+                                return None;
+                            };
+
+                            if started_at.elapsed().as_secs() < 1 {
+                                return None;
+                            }
+
+                            Some(item.view(project, true).map(Message::Item.with(start + i)))
+                        });
+
+                column([collapsible].into_iter().chain(running_tools))
+                    .spacing(10)
+                    .into()
+            }
+        }
     }
 }

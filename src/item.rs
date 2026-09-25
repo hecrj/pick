@@ -61,76 +61,11 @@ impl Item {
         }
     }
 
-    pub fn view(&self, project: &Project) -> Element<'_, Message> {
+    pub fn view(&self, project: &Project, compact: bool) -> Element<'_, Message> {
         match self {
             Item::Assistant(reply) => {
-                let reasoning = if !reply.reasoning.is_empty() {
-                    const MAX_HEIGHT: f32 = font::SMALL * 1.5 * 15.0; // 15 lines
-
-                    let is_done = !reply.content.is_empty() || !reply.tool_calls.is_empty();
-                    let header = container(
-                        match reply.timings {
-                            Some(timings) => {
-                                if is_done {
-                                    text!("Thought for {}", duration(timings.reasoning))
-                                } else {
-                                    text!("Thinking... ({})", duration(timings.reasoning))
-                                }
-                            }
-                            None => text(if is_done { "Thought" } else { "Thinking..." }),
-                        }
-                        .size(font::SMALL)
-                        .font(Font {
-                            weight: font::Weight::Bold,
-                            ..Font::MONOSPACE
-                        }),
-                    )
-                    .width(Fill)
-                    .padding(padding::bottom(10))
-                    .style(|theme: &Theme| {
-                        use iced::Color;
-                        use iced::gradient;
-
-                        let palette = theme.palette();
-
-                        container::Style {
-                            background: Some(
-                                gradient::Linear::new(0)
-                                    .add_stop(0.0, Color::TRANSPARENT)
-                                    .add_stop(0.4, palette.background.weakest.color)
-                                    .into(),
-                            ),
-                            ..container::Style::default()
-                        }
-                    });
-
-                    Some(
-                        container(stack![
-                            scrollable(
-                                container(
-                                    markdown::view(
-                                        reply.reasoning.items(),
-                                        Font::MONOSPACE,
-                                        font::SMALL
-                                    )
-                                    .map(Message::LinkClicked)
-                                )
-                                .padding(padding::top(font::SMALL * 1.375 + 10.0)),
-                            )
-                            .width(Fill)
-                            .height(Fit.max(MAX_HEIGHT))
-                            .spacing(10)
-                            .on_scroll(widget::snap.with(operation::Animation::Instant)),
-                            header,
-                        ])
-                        .style(|theme| container::Style {
-                            text_color: Some(theme.palette().secondary.strong.color),
-                            background: Some(theme.palette().background.weakest.color.into()),
-                            border: border::rounded(5),
-                            ..container::transparent(theme)
-                        })
-                        .padding(10),
-                    )
+                let reasoning = if !compact && !reply.reasoning.is_empty() {
+                    Some(reasoning(reply))
                 } else {
                     None
                 };
@@ -193,7 +128,7 @@ impl Item {
                 };
 
                 let output: Option<Element<'_, _>> = match &tool.status {
-                    Status::Running { logs } => Some(
+                    Status::Running { logs, .. } => Some(
                         scrollable(
                             column(logs.iter().map(|line| {
                                 text(&line[..line.floor_char_boundary(200)])
@@ -395,9 +330,16 @@ pub struct ToolRun {
 
 #[derive(Debug)]
 pub enum Status {
-    Running { logs: Vec<String> },
-    Success { output: tool::Output },
-    Error { output: String },
+    Running {
+        logs: Vec<String>,
+        started_at: time::Instant,
+    },
+    Success {
+        output: tool::Output,
+    },
+    Error {
+        output: String,
+    },
     Invalid,
     Aborted,
 }
@@ -422,7 +364,7 @@ pub struct Compaction {
     pub is_finished: bool,
 }
 
-fn duration(duration: time::Duration) -> String {
+pub fn duration(duration: time::Duration) -> String {
     let seconds = duration.as_secs_f64();
 
     if seconds < 1.0 {
@@ -456,4 +398,70 @@ fn prompt_progress<'a>(progress: reason::Progress) -> Option<Element<'a, Message
         )
         .into(),
     )
+}
+
+pub fn reasoning(reply: &Reply) -> Element<'_, Message> {
+    const MAX_HEIGHT: f32 = font::SMALL * 1.5 * 15.0; // 15 lines
+
+    let is_done = !reply.content.is_empty() || !reply.tool_calls.is_empty();
+
+    let header = container(
+        match reply.timings {
+            Some(timings) => {
+                if is_done {
+                    text!("Thought for {}", duration(timings.reasoning))
+                } else {
+                    text!("Thinking... ({})", duration(timings.reasoning))
+                }
+            }
+            None => text(if is_done { "Thought" } else { "Thinking..." }),
+        }
+        .size(font::SMALL)
+        .font(font::BOLD),
+    )
+    .width(Fill)
+    .padding(padding::bottom(10))
+    .style(|theme: &Theme| {
+        use iced::Color;
+        use iced::gradient;
+
+        let palette = theme.palette();
+
+        container::Style {
+            background: Some(
+                gradient::Linear::new(0)
+                    .add_stop(0.0, Color::TRANSPARENT)
+                    .add_stop(0.4, palette.background.weakest.color)
+                    .into(),
+            ),
+            ..container::Style::default()
+        }
+    });
+
+    container(stack![
+        scrollable(
+            container(
+                markdown::view(reply.reasoning.items(), Font::MONOSPACE, font::SMALL)
+                    .map(Message::LinkClicked)
+            )
+            .padding(padding::top(font::SMALL * 1.375 + 10.0)),
+        )
+        .width(Fill)
+        .height(Fit.max(MAX_HEIGHT))
+        .spacing(10)
+        .on_scroll(widget::snap.with(operation::Animation::Instant)),
+        header,
+    ])
+    .padding(10)
+    .style(summary)
+    .into()
+}
+
+pub fn summary(theme: &Theme) -> container::Style {
+    container::Style {
+        text_color: Some(theme.palette().secondary.strong.color),
+        background: Some(theme.palette().background.weakest.color.into()),
+        border: border::rounded(5),
+        ..container::transparent(theme)
+    }
 }
