@@ -312,7 +312,9 @@ impl Event {
 pub struct Version(String);
 
 impl Version {
-    fn current() -> Self {
+    /// The current version: the app's version, stamped into the
+    /// `created` frame of a new session.
+    pub fn current() -> Self {
         Self(env!("CARGO_PKG_VERSION").to_owned())
     }
 

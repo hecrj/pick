@@ -349,7 +349,7 @@ pub struct Line {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Tag {
+pub(crate) enum Tag {
     Context,
     Addition,
     Deletion,
@@ -474,6 +474,16 @@ impl Line {
         scopes.for_each(|_| {});
 
         Self { tag, style, spans }
+    }
+
+    /// The role of the line in the diff
+    pub(crate) fn tag(&self) -> Tag {
+        self.tag
+    }
+
+    /// The syntax-highlighted spans of the line, its marker first
+    pub(crate) fn spans_data(&self) -> &[text::Span<'static>] {
+        &self.spans
     }
 
     /// The full text of the line, including its marker
