@@ -181,9 +181,9 @@ where
     A: Into<Element<'a, Message>>,
     B: Into<Element<'a, Message>>,
 {
-    struct Collapsible<'a, Message> {
-        base: Box<dyn Fn(bool) -> Element<'a, Message> + 'a>,
-        content: Box<dyn Fn() -> Element<'a, Message> + 'a>,
+    struct Collapsible<B, C> {
+        base: B,
+        content: C,
     }
 
     #[derive(Debug, Clone)]
@@ -192,8 +192,10 @@ where
         Custom(Message),
     }
 
-    impl<'a, Message> Component<'a, Message> for Collapsible<'a, Message>
+    impl<'a, B, C, Message> Component<'a, Message> for Collapsible<B, C>
     where
+        B: Fn(bool) -> Element<'a, Message>,
+        C: Fn() -> Element<'a, Message>,
         Message: Clone + 'static,
     {
         type State = bool;
@@ -231,7 +233,7 @@ where
     }
 
     component(Collapsible {
-        base: Box::new(move |open| base(open).into()),
-        content: Box::new(move || content().into()),
+        base: move |open| base(open).into(),
+        content: move || content().into(),
     })
 }
