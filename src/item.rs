@@ -325,7 +325,6 @@ pub struct ToolRun {
 pub enum Status {
     Running {
         logs: Vec<String>,
-        started_at: time::Instant,
     },
     Success {
         output: tool::Output,

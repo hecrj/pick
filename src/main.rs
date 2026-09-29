@@ -635,7 +635,6 @@ impl Pick {
                     run,
                     item::Status::Running {
                         logs: Vec::new(),
-                        started_at: time::Instant::now(),
                     },
                 )
             }
@@ -1212,7 +1211,19 @@ impl Turn {
                 let c = summary[..capital].to_uppercase();
                 summary.replace_range(..capital, &c);
 
+                let reply = if let Some(item @ Item::Assistant(reply)) = messages.get(end - 1)
+                    && !reply.content.is_empty()
+                {
+                    Some(
+                        item.view(project, true)
+                            .map(Message::Item.with(start + end)),
+                    )
+                } else {
+                    None
+                };
+
                 let collapsible = widget::collapsible(
+                    messages.len() == end && reply.is_none(),
                     move |open| {
                         container(
                             text!("{}  {}", if open { "▾" } else { "▸" }, summary.clone())
@@ -1247,48 +1258,9 @@ impl Turn {
                         .spacing(20)
                         .height(Shrink)
                     },
-                )
-                .boxed();
+                );
 
-                let running_tools =
-                    messages[start..end]
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, item)| {
-                            let Item::Tool(item::ToolRun {
-                                status: item::Status::Running { started_at, .. },
-                                ..
-                            }) = item
-                            else {
-                                return None;
-                            };
-
-                            if started_at.elapsed().as_secs() < 1 {
-                                return None;
-                            }
-
-                            Some(
-                                item.view(project, true)
-                                    .map(Message::Item.with(start + i))
-                                    .boxed(),
-                            )
-                        });
-
-                let reply = if let Some(item @ Item::Assistant(reply)) = messages.get(end - 1)
-                    && !reply.content.is_empty()
-                {
-                    Some(
-                        item.view(project, true)
-                            .map(Message::Item.with(start + end))
-                            .boxed(),
-                    )
-                } else {
-                    None
-                };
-
-                column([collapsible].into_iter().chain(running_tools).chain(reply))
-                    .spacing(10)
-                    .boxed()
+                column![collapsible, reply].spacing(10).boxed()
             }
         }
     }

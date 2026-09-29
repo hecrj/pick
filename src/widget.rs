@@ -173,6 +173,7 @@ pub fn context_led<Message: 'static>(
 }
 
 pub fn collapsible<'a, Message, A, B>(
+    force_open: bool,
     base: impl Fn(bool) -> A + 'a,
     content: impl Fn() -> B + 'a,
 ) -> impl Widget<Message> + 'a
@@ -182,13 +183,14 @@ where
     B: Widget<Message> + 'a,
 {
     struct Collapsible<B, C> {
+        force_open: bool,
         base: B,
         content: C,
     }
 
     #[derive(Debug, Clone)]
     enum Event<Message> {
-        Toggle(bool),
+        Toggle,
         Custom(Message),
     }
 
@@ -210,8 +212,8 @@ where
             _renderer: &Renderer,
         ) -> Option<Message> {
             match event {
-                Event::Toggle(open) => {
-                    *state = open;
+                Event::Toggle => {
+                    *state = !*state;
                     None
                 }
                 Event::Custom(message) => Some(message),
@@ -219,9 +221,11 @@ where
         }
 
         fn view(&self, open: &bool) -> impl Widget<Self::Event> + 'a {
+            let open = self.force_open || *open;
+
             column![
-                button((self.base)(*open).map(Event::Custom))
-                    .on_press(Event::Toggle(!*open))
+                button((self.base)(open).map(Event::Custom))
+                    .on_press(Event::Toggle)
                     .padding(0)
                     .style(|theme: &Theme, _status| button::Style {
                         text_color: theme.seed().text,
@@ -233,5 +237,9 @@ where
         }
     }
 
-    component(Collapsible { base, content })
+    component(Collapsible {
+        force_open,
+        base,
+        content,
+    })
 }
