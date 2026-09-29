@@ -1,5 +1,5 @@
 use iced::widget::markdown;
-use iced::{Element, Font, Pixels, Theme};
+use iced::{Font, Pixels, Theme, Widget};
 
 pub use markdown::{Item, Uri};
 
@@ -32,7 +32,7 @@ impl Markdown {
     }
 }
 
-pub fn view(items: &[Item], font: Font, size: impl Into<Pixels>) -> Element<'_, Uri> {
+pub fn view(items: &[Item], font: Font, size: impl Into<Pixels>) -> impl Widget<Uri> {
     markdown(
         items,
         markdown::Settings {

@@ -5,7 +5,7 @@ use crate::tool::Output;
 use crate::tool::call::{self, Call};
 
 use iced::widget::{column, rich_text, span, text};
-use iced::{Element, Never};
+use iced::{Element, Never, Widget};
 
 use serde::Deserialize;
 use tokio::io::AsyncBufReadExt;
@@ -95,10 +95,9 @@ impl Call for Bash {
             .preview
             .lines
             .iter()
-            .map(|line| rich_text(line).size(font::SMALL).into())
-            .chain(notice.into_iter().map(Element::from));
+            .map(|line| rich_text(line).size(font::SMALL));
 
-        Some(column(lines).padding(10).into())
+        Some(column![column(lines), notice].padding(10).boxed())
     }
 
     fn run(&self, project: &Path) -> call::Run {

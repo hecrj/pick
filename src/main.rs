@@ -29,7 +29,7 @@ use iced::widget::operation;
 use iced::widget::{
     center, column, container, row, rule, scrollable, space, sticky, text, text_editor, toggler,
 };
-use iced::{Center, Color, Element, Fill, Fit, Shrink, Subscription, Task, Theme};
+use iced::{Center, Color, Fill, Fit, Shrink, Subscription, Task, Theme, Widget};
 use iced_palace::widget::typewriter;
 
 use function::Binary;
@@ -680,7 +680,6 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
 
         let model = self.model.as_ref()?;
         let context_size = self.context_size()?;
-
         let timings = self.timings()?;
 
         let total_tokens = timings.total_tokens();
@@ -825,14 +824,14 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
         )
     }
 
-    fn view(&self) -> Element<'_, Message> {
+    fn view(&self) -> impl Widget<Message> {
         match self.mode {
-            Mode::Chat => self.chat(),
-            Mode::Review => self.review(),
+            Mode::Chat => self.chat().boxed(),
+            Mode::Review => self.review().boxed(),
         }
     }
 
-    fn review(&self) -> Element<'_, Message> {
+    fn review(&self) -> impl Widget<Message> {
         let footer = sticky(
             container(
                 column![
@@ -844,7 +843,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                 .spacing(10),
             )
             .padding(10)
-            .style(|theme| {
+            .style(|theme: &Theme| {
                 container::Style::default().background(
                     gradient::Linear::new(0)
                         .add_stop(0.9, theme.seed().background.scale_alpha(0.9))
@@ -864,10 +863,9 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
             .padding(10),
         )
         .padding([0, 10])
-        .into()
     }
 
-    fn chat(&self) -> Element<'_, Message> {
+    fn chat(&self) -> impl Widget<Message> {
         let input = text_editor(&self.input)
             .id("input")
             .height(Fit.max(600))
@@ -893,7 +891,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
             });
 
         let footer = container(column![input, self.status_bar()].spacing(10))
-            .style(|theme| {
+            .style(|theme: &Theme| {
                 container::Style::default().background(
                     gradient::Linear::new(0)
                         .add_stop(0.2, theme.seed().background)
@@ -924,7 +922,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                 .width(Fit.max(MAX_CONTENT_WIDTH as f32 * 0.7)),
             )
             .padding([0, 10])
-            .into();
+            .boxed();
         }
 
         container(
@@ -935,13 +933,17 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                             self.turns()
                                 .map(|turn| turn.view(&self.project, &self.messages)),
                         )
+                        .spacing(20)
+                        .padding(padding::top(10))
+                        .boxed()
                     } else {
                         column(self.messages.iter().enumerate().map(|(i, item)| {
                             item.view(&self.project, false).map(Message::Item.with(i))
                         }))
-                    }
-                    .spacing(20)
-                    .padding(padding::top(10)),
+                        .spacing(20)
+                        .padding(padding::top(10))
+                        .boxed()
+                    },
                     space::vertical(),
                     sticky(footer),
                 ]
@@ -955,10 +957,10 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
             .padding(10),
         )
         .padding([0, 10])
-        .into()
+        .boxed()
     }
 
-    fn status_bar(&self) -> Element<'_, Message> {
+    fn status_bar(&self) -> impl Widget<Message> {
         let repository = self
             .repository
             .summary()
@@ -1028,7 +1030,6 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
         ]
         .align_y(Center)
         .spacing(10)
-        .into()
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -1157,9 +1158,12 @@ enum Turn {
 }
 
 impl Turn {
-    fn view<'a>(self, project: &'a Project, messages: &'a [Item]) -> Element<'a, Message> {
+    fn view<'a>(self, project: &'a Project, messages: &'a [Item]) -> impl Widget<Message> + 'a {
         match self {
-            Turn::Standalone(i) => messages[i].view(project, true).map(Message::Item.with(i)),
+            Turn::Standalone(i) => messages[i]
+                .view(project, true)
+                .map(Message::Item.with(i))
+                .boxed(),
             Turn::Work { start, end } => {
                 let mut reasoning = time::Duration::ZERO;
                 let mut commands = 0;
@@ -1227,10 +1231,12 @@ impl Turn {
                                 |(i, item)| {
                                     Some(match item {
                                         Item::Assistant(reply) => item::reasoning(reply)
-                                            .map(Message::Item.with(start + i)),
+                                            .map(Message::Item.with(start + i))
+                                            .boxed(),
                                         Item::Tool(_) => item
                                             .view(project, true)
-                                            .map(Message::Item.with(start + i)),
+                                            .map(Message::Item.with(start + i))
+                                            .boxed(),
                                         _ => return None,
                                     })
                                 }
@@ -1242,7 +1248,8 @@ impl Turn {
                         .spacing(20)
                         .height(Shrink)
                     },
-                );
+                )
+                .boxed();
 
                 let running_tools =
                     messages[start..end]
@@ -1261,12 +1268,16 @@ impl Turn {
                                 return None;
                             }
 
-                            Some(item.view(project, true).map(Message::Item.with(start + i)))
+                            Some(
+                                item.view(project, true)
+                                    .map(Message::Item.with(start + i))
+                                    .boxed(),
+                            )
                         });
 
                 column([collapsible].into_iter().chain(running_tools))
                     .spacing(10)
-                    .into()
+                    .boxed()
             }
         }
     }

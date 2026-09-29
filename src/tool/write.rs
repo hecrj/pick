@@ -5,7 +5,7 @@ use crate::tool::Output;
 use crate::tool::call::{self, Call};
 
 use iced::widget::{column, rich_text, text};
-use iced::{Element, Fill, Never};
+use iced::{Element, Fill, Never, Widget};
 
 use serde::Deserialize;
 
@@ -54,20 +54,18 @@ impl Call for Write {
                 .as_ref()
                 .map(|notice| text(notice).size(14).style(text::secondary));
 
-            let lines = preview
-                .lines
-                .iter()
-                .map(|spans| {
-                    rich_text(spans.as_slice())
-                        .size(14)
-                        .width(Fill)
-                        .wrapping(text::Wrapping::None)
-                        .ellipsis(text::Ellipsis::End)
-                        .into()
-                })
-                .chain(notice.into_iter().map(Element::from));
+            let lines = preview.lines.iter().map(|spans| {
+                rich_text(spans.as_slice())
+                    .size(14)
+                    .width(Fill)
+                    .wrapping(text::Wrapping::None)
+                    .ellipsis(text::Ellipsis::End)
+            });
 
-            column(lines).width(Fill).padding(10).into()
+            column![column(lines), notice]
+                .width(Fill)
+                .padding(10)
+                .boxed()
         })
     }
 

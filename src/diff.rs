@@ -9,7 +9,7 @@ use iced::theme::palette;
 use iced::widget::{
     button, center, center_y, column, container, hover, rich_text, row, space, span, text,
 };
-use iced::{Center, Code, Color, Element, Fill, Font, Never, Pixels, Theme, never};
+use iced::{Center, Code, Color, Fill, Font, Never, Pixels, Theme, Widget, never};
 
 use similar::{ChangeTag, InlineChangeOptions, TextDiff};
 
@@ -77,17 +77,15 @@ impl Diff {
         Self { palette, lines }
     }
 
-    pub fn view(&self) -> impl Iterator<Item = Element<'_, Never>> {
+    pub fn view(&self) -> impl Iterator<Item = impl Widget<Never>> {
         self.lines.iter().map(move |line| {
-            container(line.spans())
-                .style(|_theme| {
-                    container::Style::default().background(
-                        line.style
-                            .map(|style| style.gutter)
-                            .unwrap_or(Color::TRANSPARENT),
-                    )
-                })
-                .into()
+            container(line.spans()).style(|_theme| {
+                container::Style::default().background(
+                    line.style
+                        .map(|style| style.gutter)
+                        .unwrap_or(Color::TRANSPARENT),
+                )
+            })
         })
     }
 }
@@ -175,7 +173,7 @@ impl Hunk {
         &self.raw
     }
 
-    pub fn gutter<'a>(&'a self, content: impl text::IntoFragment<'a>) -> Element<'a, Never> {
+    pub fn gutter<'a>(&'a self, content: impl text::IntoFragment<'a>) -> impl Widget<Never> + 'a {
         let content = text(content)
             .size(font::SMALL)
             .line_height(Line::HEIGHT)
@@ -198,7 +196,6 @@ impl Hunk {
             .align_y(Center),
         )
         .style(|_theme| container::Style::default().background(self.diff.palette.heading.gutter))
-        .into()
     }
 
     pub fn view(&self) -> impl Iterator<Item = View<'_>> {
@@ -244,27 +241,28 @@ impl fmt::Display for Index {
 }
 
 impl<'a> View<'a> {
-    pub fn view(self) -> Element<'a, Never> {
+    pub fn view(self) -> impl Widget<Never> + 'a {
         let gutter = self.line.gutter(self.index.number);
 
-        container(row![gutter, self.line.spans()])
-            .style(|_theme| {
-                container::Style::default().background(
-                    self.line
-                        .style
-                        .map(|style| style.gutter)
-                        .unwrap_or_default(),
-                )
-            })
-            .into()
+        container(row![gutter, self.line.spans()]).style(|_theme| {
+            container::Style::default().background(
+                self.line
+                    .style
+                    .map(|style| style.gutter)
+                    .unwrap_or_default(),
+            )
+        })
     }
 
-    pub fn with_action<Message>(self, add: impl Fn(Index) -> Message + 'a) -> Element<'a, Message>
+    pub fn with_action<Message>(
+        self,
+        add: impl Fn(Index) -> Message + 'a,
+    ) -> impl Widget<Message> + 'a
     where
         Message: Clone + 'static,
     {
         let gutter = self.line.gutter(self.index.number);
-        let line = Element::from(row![gutter, self.line.spans()]).map(never);
+        let line = row![gutter, self.line.spans()].map(never);
 
         let line = hover(
             line,
@@ -295,22 +293,20 @@ impl<'a> View<'a> {
             .padding(padding::left(Line::GUTTER_WIDTH as f32 * 2.0 - 12.5)),
         );
 
-        container(line)
-            .style(|_theme| {
-                container::Style::default().background(
-                    self.line
-                        .style
-                        .map(|style| style.gutter)
-                        .unwrap_or_default(),
-                )
-            })
-            .into()
+        container(line).style(|_theme| {
+            container::Style::default().background(
+                self.line
+                    .style
+                    .map(|style| style.gutter)
+                    .unwrap_or_default(),
+            )
+        })
     }
 
     pub fn with_decoration<Message: 'static>(
         self,
-        footer: impl Into<Element<'a, Message>>,
-    ) -> Element<'a, Message> {
+        footer: impl Widget<Message> + 'a,
+    ) -> impl Widget<Message> + 'a {
         let gutter = self.line.gutter(self.index.number).map(never);
 
         let line = row![
@@ -330,16 +326,14 @@ impl<'a> View<'a> {
             ]
         ];
 
-        container(line)
-            .style(|_theme| {
-                container::Style::default().background(
-                    self.line
-                        .style
-                        .map(|style| style.gutter)
-                        .unwrap_or_default(),
-                )
-            })
-            .into()
+        container(line).style(|_theme| {
+            container::Style::default().background(
+                self.line
+                    .style
+                    .map(|style| style.gutter)
+                    .unwrap_or_default(),
+            )
+        })
     }
 }
 
@@ -493,7 +487,7 @@ impl Line {
         text
     }
 
-    fn spans(&self) -> Element<'_, Never> {
+    fn spans(&self) -> impl Widget<Never> {
         container(
             rich_text(self.spans.as_slice())
                 .wrapping(text::Wrapping::WordOrGlyph)
@@ -509,14 +503,13 @@ impl Line {
                     .unwrap_or(Color::TRANSPARENT),
             )
         })
-        .into()
     }
 
-    fn gutter(&self, number: git::Number) -> Element<'_, Never> {
-        row![self.number(number, false), self.number(number, true)].into()
+    fn gutter(&self, number: git::Number) -> impl Widget<Never> {
+        row![self.number(number, false), self.number(number, true)]
     }
 
-    fn number(&self, number: git::Number, right: bool) -> Element<'_, Never> {
+    fn number(&self, number: git::Number, right: bool) -> impl Widget<Never> {
         let n = match number {
             git::Number::Context(old, new) => Some(if right { new } else { old }),
             git::Number::Old(n) => (!right).then_some(n),
@@ -536,7 +529,6 @@ impl Line {
         }))
         .height(Self::HEIGHT)
         .width(Self::GUTTER_WIDTH)
-        .into()
     }
 }
 

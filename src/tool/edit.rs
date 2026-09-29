@@ -5,7 +5,7 @@ use crate::tool::call::{self, Call};
 use crate::tool::{BACKGROUND, Output};
 
 use iced::widget::{column, container, scrollable};
-use iced::{Element, Fill, Fit, Never};
+use iced::{Element, Fill, Fit, Never, Widget};
 
 use serde::Deserialize;
 
@@ -70,7 +70,7 @@ impl Call for Edit {
                     )),
             )
             .padding([10, 0])
-            .into(),
+            .boxed(),
         )
     }
 

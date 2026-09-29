@@ -12,7 +12,7 @@ use iced::widget::operation;
 use iced::widget::{
     button, center, column, container, rich_text, right, row, span, sticky, text, text_editor,
 };
-use iced::{Background, Bottom, Center, Element, Fill, Fit, Font, Task, Theme, never};
+use iced::{Background, Bottom, Center, Fill, Fit, Font, Task, Theme, Widget, never};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -305,7 +305,7 @@ impl Repository {
     }
 
     /// The review's message input, while a review is being written
-    pub fn message(&self) -> Option<Element<'_, Message>> {
+    pub fn message(&self) -> Option<impl Widget<Message>> {
         if !self.is_reviewing() {
             return None;
         }
@@ -334,12 +334,11 @@ impl Repository {
         Some(
             row![container(editor).width(Fill), control]
                 .spacing(10)
-                .align_y(Bottom)
-                .into(),
+                .align_y(Bottom),
         )
     }
 
-    pub fn summary(&self) -> Option<Element<'_, Message>> {
+    pub fn summary(&self) -> Option<impl Widget<Message>> {
         let status = self.status.as_ref()?;
 
         let branch = match &status.branch {
@@ -370,7 +369,7 @@ impl Repository {
         let review = button(changes)
             .on_press(Message::ToggleReview)
             .padding([0, 2])
-            .style(|theme, status| {
+            .style(|theme: &Theme, status| {
                 let palette = theme.palette();
 
                 let color = match status {
@@ -388,12 +387,12 @@ impl Repository {
                 }
             });
 
-        Some(row![branch, review].spacing(8).into())
+        Some(row![branch, review].spacing(8))
     }
 
-    pub fn review(&self) -> Element<'_, Message> {
+    pub fn review(&self) -> impl Widget<Message> {
         if self.files.is_empty() {
-            return center("Working tree is clean!").into();
+            return center("Working tree is clean!").boxed();
         }
 
         column(self.files.iter().map(|file| {
@@ -416,7 +415,7 @@ impl Repository {
                 .align_y(Center),
             )
             .padding(11)
-            .style(|theme| {
+            .style(|theme: &Theme| {
                 container::Style::default()
                     .background(theme.palette().background.weakest.color)
                     .border(
@@ -436,22 +435,25 @@ impl Repository {
             .spacing(10);
 
             container(column![
-                sticky(container(header).padding(padding::top(10)).style(|theme| {
-                    container::Style::default().background(theme.seed().background)
-                })),
+                sticky(
+                    container(header)
+                        .padding(padding::top(10))
+                        .style(|theme: &Theme| {
+                            container::Style::default().background(theme.seed().background)
+                        })
+                ),
                 hunks.padding(padding::horizontal(1)),
             ])
-            .style(|theme| container::Style {
+            .style(|theme: &Theme| container::Style {
                 border: border::rounded(border::bottom(5))
                     .width(1)
                     .color(theme.palette().background.weak.color),
                 ..container::Style::default()
             })
-            .into()
         }))
         .spacing(10)
         .height(Fill)
-        .into()
+        .boxed()
     }
 }
 
@@ -472,7 +474,7 @@ impl Hunk {
         &'a self,
         comments: &'a HashMap<diff::Index, Draft>,
         is_reviewing: bool,
-    ) -> Element<'a, Message> {
+    ) -> impl Widget<Message> + 'a {
         let heading = self
             .diff
             .gutter(format!(
@@ -491,13 +493,12 @@ impl Hunk {
             heading,
             column(self.diff.view().map(|view| {
                 if let Some(comment) = comments.get(view.index) {
-                    comment.view(view, is_reviewing)
+                    comment.view(view, is_reviewing).boxed()
                 } else {
-                    view.with_action(Message::Comment)
+                    view.with_action(Message::Comment).boxed()
                 }
             }))
         ]
-        .into()
     }
 }
 
@@ -508,7 +509,7 @@ pub enum Draft {
 }
 
 impl Draft {
-    fn view<'a>(&'a self, view: diff::View<'a>, is_reviewing: bool) -> Element<'a, Message> {
+    fn view<'a>(&'a self, view: diff::View<'a>, is_reviewing: bool) -> impl Widget<Message> + 'a {
         let comment = match self {
             Draft::Writing(content) => {
                 let comment = text_editor(content)

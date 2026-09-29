@@ -14,9 +14,9 @@ use iced::padding;
 use iced::time;
 use iced::widget::operation;
 use iced::widget::{
-    center_x, column, container, progress_bar, right, row, scrollable, stack, text,
+    Text, center_x, column, container, progress_bar, right, row, scrollable, stack, text,
 };
-use iced::{Center, Element, Fill, Fit, Font, Pixels, Task, Theme, never};
+use iced::{Center, Fill, Fit, Font, Pixels, Task, Theme, Widget, never};
 
 use function::Binary;
 
@@ -61,7 +61,7 @@ impl Item {
         }
     }
 
-    pub fn view(&self, project: &Project, compact: bool) -> Element<'_, Message> {
+    pub fn view(&self, project: &Project, compact: bool) -> impl Widget<Message> {
         match self {
             Item::Assistant(reply) => {
                 let reasoning = if !compact && !reply.reasoning.is_empty() {
@@ -81,7 +81,7 @@ impl Item {
                     .map(Message::LinkClicked)),
                 ]
                 .spacing(15)
-                .into()
+                .boxed()
             }
             Item::User(message) => right(
                 container(
@@ -91,7 +91,7 @@ impl Item {
                 .padding(10)
                 .style(container::rounded_box),
             )
-            .into(),
+            .boxed(),
             Item::Tool(tool) => {
                 const TOOL_LOG_LINE_HEIGHT: f32 = 18.0;
                 const MAX_TOOL_LOG_HEIGHT: f32 = TOOL_LOG_LINE_HEIGHT * 10.0 + 5.0 * 9.0; // 10 lines: 10 × 18px + 9 × 5px spacing
@@ -110,24 +110,22 @@ impl Item {
                     row![label, title].spacing(10).align_y(Center)
                 };
 
-                let arguments: Option<Element<'_, Message>> = match &tool.state {
-                    Ok(state) => state.view().map(|state| {
-                        container(state.map(never))
-                            .width(Fill)
-                            .style(|_theme| {
+                let arguments = match &tool.state {
+                    Ok(state) => state
+                        .view()
+                        .map(|state| {
+                            container(state.map(never)).width(Fill).style(|_theme| {
                                 container::Style::default().background(tool::BACKGROUND)
                             })
-                            .into()
-                    }),
-                    Err(error) => Some(
-                        text!("{error}")
-                            .size(font::SMALL)
-                            .style(text::danger)
-                            .into(),
-                    ),
+                        })
+                        .boxed(),
+                    Err(error) => text!("{error}")
+                        .size(font::SMALL)
+                        .style(text::danger)
+                        .boxed(),
                 };
 
-                let output: Option<Element<'_, _>> = match &tool.status {
+                let output = match &tool.status {
                     Status::Running { logs, .. } => Some(
                         scrollable(
                             column(logs.iter().map(|line| {
@@ -136,7 +134,6 @@ impl Item {
                                     .ellipsis(text::Ellipsis::End)
                                     .size(font::SMALL)
                                     .line_height(Pixels(TOOL_LOG_LINE_HEIGHT))
-                                    .into()
                             }))
                             .spacing(5),
                         )
@@ -145,7 +142,7 @@ impl Item {
                         .height(Fit.max(MAX_TOOL_LOG_HEIGHT))
                         .on_scroll(widget::snap.with(operation::Animation::Auto))
                         .spacing(10)
-                        .into(),
+                        .boxed(),
                     ),
                     Status::Success { output } if output.lines() > 0 => {
                         /// The first and last lines a long finished output
@@ -153,12 +150,11 @@ impl Item {
                         const HEAD: usize = 2;
                         const TAIL: usize = 3;
 
-                        fn line<'a>(line: &'a str) -> Element<'a, Message> {
+                        fn line(line: &str) -> Text<'_> {
                             text(&line[..line.floor_char_boundary(200)])
                                 .wrapping(text::Wrapping::None)
                                 .ellipsis(text::Ellipsis::End)
                                 .size(font::SMALL)
-                                .into()
                         }
 
                         let total = output.lines();
@@ -181,12 +177,9 @@ impl Item {
                                     output
                                         .head(HEAD)
                                         .map(line)
-                                        .chain(std::iter::once(
-                                            text(marker)
-                                                .size(font::SMALL)
-                                                .style(text::secondary)
-                                                .into(),
-                                        ))
+                                        .chain([text(marker)
+                                            .size(font::SMALL)
+                                            .style(text::secondary)])
                                         .chain(output.tail(TAIL).map(line)),
                                 )
                                 .spacing(5)
@@ -194,7 +187,7 @@ impl Item {
                                 column(output.all().map(line))
                             }
                             .spacing(5)
-                            .into(),
+                            .boxed(),
                         )
                     }
                     Status::Success { .. }
@@ -209,7 +202,7 @@ impl Item {
                             trimmed.to_owned()
                         })
                         .size(font::SMALL)
-                        .into()
+                        .boxed()
                     }),
                 };
 
@@ -245,20 +238,23 @@ impl Item {
                 .width(Fill)
                 .padding(1)
                 .style(container::bordered_box)
-                .into()
+                .boxed()
             }
             Item::Review(review) => {
-                let message = review.message.as_ref().map(|message| {
-                    right(
-                        container(
-                            markdown::view(message.items(), Font::DEFAULT, font::NORMAL)
-                                .map(Message::LinkClicked),
+                let message = review
+                    .message
+                    .as_ref()
+                    .map(|message| {
+                        right(
+                            container(
+                                markdown::view(message.items(), Font::DEFAULT, font::NORMAL)
+                                    .map(Message::LinkClicked),
+                            )
+                            .padding(10)
+                            .style(container::rounded_box),
                         )
-                        .padding(10)
-                        .style(container::rounded_box),
-                    )
-                    .into()
-                });
+                    })
+                    .boxed();
 
                 let comments = review.comments.iter().map(|comment| {
                     let header = {
@@ -273,13 +269,10 @@ impl Item {
 
                     container(column![
                         header,
-                        container(
-                            Element::from(column(comment.hunk.view().map(diff::View::view)))
-                                .map(never),
-                        )
-                        .style(|_theme| {
-                            container::Style::default().background(tool::BACKGROUND)
-                        }),
+                        container(column(comment.hunk.view().map(diff::View::view)).map(never),)
+                            .style(|_theme| {
+                                container::Style::default().background(tool::BACKGROUND)
+                            }),
                         container(
                             markdown::view(comment.content.items(), Font::DEFAULT, font::NORMAL)
                                 .map(Message::LinkClicked),
@@ -289,12 +282,12 @@ impl Item {
                     .width(Fill)
                     .padding(1)
                     .style(container::bordered_box)
-                    .into()
+                    .boxed()
                 });
 
-                column(message.into_iter().chain(comments))
+                column([message].into_iter().chain(comments))
                     .spacing(10)
-                    .into()
+                    .boxed()
             }
             Item::Compaction(compaction) => {
                 let notice = center_x(text(if compaction.is_finished {
@@ -307,7 +300,7 @@ impl Item {
 
                 column![prompt_progress(compaction.reply.prompt), notice]
                     .spacing(10)
-                    .into()
+                    .boxed()
             }
         }
     }
@@ -384,23 +377,20 @@ pub fn duration(duration: time::Duration) -> String {
     }
 }
 
-fn prompt_progress<'a>(progress: reason::Progress) -> Option<Element<'a, Message>> {
+fn prompt_progress(progress: reason::Progress) -> Option<impl Widget<Message>> {
     if progress.total == progress.processed {
         return None;
     }
 
-    Some(
-        center_x(
-            progress_bar(0.0..=1.0, progress.processed as f32 / progress.total as f32)
-                .girth(10)
-                .length(100)
-                .style(progress_bar::secondary),
-        )
-        .into(),
-    )
+    Some(center_x(
+        progress_bar(0.0..=1.0, progress.processed as f32 / progress.total as f32)
+            .girth(10)
+            .length(100)
+            .style(progress_bar::secondary),
+    ))
 }
 
-pub fn reasoning(reply: &Reply) -> Element<'_, Message> {
+pub fn reasoning(reply: &Reply) -> impl Widget<Message> {
     const MAX_HEIGHT: f32 = font::SMALL * 1.5 * 15.0; // 15 lines
 
     let is_done = !reply.content.is_empty() || !reply.tool_calls.is_empty();
@@ -454,7 +444,6 @@ pub fn reasoning(reply: &Reply) -> Element<'_, Message> {
     ])
     .padding(10)
     .style(summary)
-    .into()
 }
 
 pub fn summary(theme: &Theme) -> container::Style {
