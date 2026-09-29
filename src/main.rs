@@ -631,12 +631,7 @@ impl Pick {
                 self.tasks
                     .insert(Work::Tool(call.id.clone()), handle.abort_on_drop());
 
-                (
-                    run,
-                    item::Status::Running {
-                        logs: Vec::new(),
-                    },
-                )
+                (run, item::Status::Running { logs: Vec::new() })
             }
             Err(_error) => (Task::none(), item::Status::Invalid),
         };
@@ -1226,9 +1221,16 @@ impl Turn {
                     messages.len() == end && reply.is_none(),
                     move |open| {
                         container(
-                            text!("{}  {}", if open { "▾" } else { "▸" }, summary.clone())
+                            text!("{}  {}", summary, if open { "▾" } else { "▸" })
                                 .size(font::SMALL)
-                                .font(font::BOLD),
+                                .font(font::BOLD)
+                                .style(move |theme: &Theme| text::Style {
+                                    color: Some(if open {
+                                        theme.seed().text
+                                    } else {
+                                        theme.palette().secondary.strong.color
+                                    }),
+                                }),
                         )
                         .width(Fill)
                         .padding(10)
@@ -1251,16 +1253,16 @@ impl Turn {
                                     })
                                 }
                             ))
-                            .padding(padding::top(20))
-                            .spacing(20)
+                            .padding(padding::top(10))
+                            .spacing(10)
                         ]
-                        .padding(padding::left(20))
-                        .spacing(20)
+                        .spacing(10)
+                        .padding(padding::left(10))
                         .height(Shrink)
                     },
                 );
 
-                column![collapsible, reply].spacing(10).boxed()
+                column![collapsible, reply].spacing(20).boxed()
             }
         }
     }
