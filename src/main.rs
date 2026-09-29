@@ -1125,7 +1125,6 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
 
             Some(match item {
                 Item::User(_) | Item::Review(_) | Item::Compaction(_) => Turn::Standalone(i),
-                Item::Assistant(reply) if !reply.content.is_empty() => Turn::Standalone(i),
                 Item::Assistant(_) | Item::Tool(_) => {
                     let mut end = i + 1;
 
@@ -1133,15 +1132,15 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                         match next {
                             Item::User(_) | Item::Review(_) | Item::Compaction(_) => break,
                             Item::Assistant(reply) if !reply.content.is_empty() => {
+                                let _ = items.next();
                                 end += 1;
                                 break;
                             }
                             _ => {}
                         }
 
-                        end += 1;
-
                         let _ = items.next();
+                        end += 1;
                     }
 
                     Turn::Work { start: i, end }
@@ -1275,7 +1274,19 @@ impl Turn {
                             )
                         });
 
-                column([collapsible].into_iter().chain(running_tools))
+                let reply = if let Some(item @ Item::Assistant(reply)) = messages.get(end - 1)
+                    && !reply.content.is_empty()
+                {
+                    Some(
+                        item.view(project, true)
+                            .map(Message::Item.with(start + end))
+                            .boxed(),
+                    )
+                } else {
+                    None
+                };
+
+                column([collapsible].into_iter().chain(running_tools).chain(reply))
                     .spacing(10)
                     .boxed()
             }
