@@ -71,7 +71,7 @@ impl Item {
                 };
 
                 column![
-                    prompt_progress(reply.prompt),
+                    upload(reply, false),
                     reasoning,
                     (!reply.content.is_empty()).then(|| markdown::view(
                         reply.content.items(),
@@ -298,7 +298,7 @@ impl Item {
                     format!("Compacting... {} tokens", compaction.tokens)
                 }));
 
-                column![prompt_progress(compaction.reply.prompt), notice]
+                column![upload(&compaction.reply, false), notice]
                     .spacing(10)
                     .boxed()
             }
@@ -323,15 +323,9 @@ pub struct ToolRun {
 
 #[derive(Debug)]
 pub enum Status {
-    Running {
-        logs: Vec<String>,
-    },
-    Success {
-        output: tool::Output,
-    },
-    Error {
-        output: String,
-    },
+    Running { logs: Vec<String> },
+    Success { output: tool::Output },
+    Error { output: String },
     Invalid,
     Aborted,
 }
@@ -376,16 +370,24 @@ pub fn duration(duration: time::Duration) -> String {
     }
 }
 
-fn prompt_progress(progress: reason::Progress) -> Option<impl Widget<Message>> {
-    if progress.total == progress.processed {
+pub fn upload(reply: &Reply, force: bool) -> Option<impl Widget<Message>> {
+    if reply.prompt.total == reply.prompt.processed
+        || (!force
+            && reply
+                .timings
+                .is_some_and(|timings| timings.prompt.total <= time::Duration::from_secs(1)))
+    {
         return None;
     }
 
     Some(center_x(
-        progress_bar(0.0..=1.0, progress.processed as f32 / progress.total as f32)
-            .girth(10)
-            .length(100)
-            .style(progress_bar::secondary),
+        progress_bar(
+            0.0..=1.0,
+            reply.prompt.processed as f32 / reply.prompt.total as f32,
+        )
+        .girth(10)
+        .length(100)
+        .style(progress_bar::secondary),
     ))
 }
 

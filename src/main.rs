@@ -1202,6 +1202,10 @@ impl Turn {
                 .collect::<Vec<_>>()
                 .join(", ");
 
+                if summary.is_empty() {
+                    summary = "Catching up...".to_owned();
+                }
+
                 let capital = summary.ceil_char_boundary(1);
                 let c = summary[..capital].to_uppercase();
                 summary.replace_range(..capital, &c);
@@ -1242,9 +1246,14 @@ impl Turn {
                             column(messages[start..end].iter().enumerate().filter_map(
                                 |(i, item)| {
                                     Some(match item {
-                                        Item::Assistant(reply) => item::reasoning(reply)
-                                            .map(Message::Item.with(start + i))
-                                            .boxed(),
+                                        Item::Assistant(reply) => column![
+                                            item::upload(reply, i == 0),
+                                            (!reply.reasoning.is_empty())
+                                                .then(|| item::reasoning(reply)),
+                                        ]
+                                        .spacing(10)
+                                        .map(Message::Item.with(start + i))
+                                        .boxed(),
                                         Item::Tool(_) => item
                                             .view(project, true)
                                             .map(Message::Item.with(start + i))
