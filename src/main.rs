@@ -1003,6 +1003,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                         Connection::Connecting => Some(palette.warning),
                         Connection::Connected(_) => None,
                     },
+                    selection: None,
                 }
             });
 
@@ -1159,6 +1160,7 @@ impl Turn {
                 .boxed(),
             Turn::Work { start, end } => {
                 let mut reasoning = time::Duration::ZERO;
+                let mut command = String::new();
                 let mut commands = 0;
                 let mut reads = 0;
                 let mut edits = 0;
@@ -1170,7 +1172,16 @@ impl Turn {
                             reasoning += timings.reasoning;
                         }
                         Item::Tool(run) => match run.call.name.as_str() {
-                            "bash" => commands += 1,
+                            "bash" => {
+                                if command.is_empty()
+                                    && let Ok(state) = &run.state
+                                    && let Some(title) = state.title(project)
+                                {
+                                    command = title.into_owned();
+                                }
+
+                                commands += 1
+                            }
                             "read" => reads += 1,
                             "edit" => edits += 1,
                             "write" => writes += 1,
@@ -1189,8 +1200,13 @@ impl Turn {
                 };
 
                 let mut summary = [
-                    (commands > 0)
-                        .then(|| format!("ran {commands} {}", inflect("command", commands))),
+                    (commands > 0).then(|| {
+                        if commands == 1 && !command.is_empty() {
+                            command
+                        } else {
+                            format!("ran {commands} {}", inflect("command", commands))
+                        }
+                    }),
                     (reads > 0).then(|| format!("read {reads} {}", inflect("file", reads))),
                     (edits > 0).then(|| format!("edited {edits} {}", inflect("file", edits))),
                     (writes > 0).then(|| format!("wrote {writes} {}", inflect("file", writes))),
@@ -1234,6 +1250,7 @@ impl Turn {
                                     } else {
                                         theme.palette().secondary.strong.color
                                     }),
+                                    selection: None,
                                 }),
                         )
                         .width(Fill)

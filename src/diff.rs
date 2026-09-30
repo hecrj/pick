@@ -525,6 +525,7 @@ impl Line {
                     } else {
                         None
                     },
+                    selection: None,
                 })
         }))
         .height(Self::HEIGHT)
