@@ -38,16 +38,18 @@
 //!   home tmpfs;
 //! - the environment is cleared down to `PATH`, `HOME`, `USER`, the
 //!   ssh-agent socket variable, the display variables the GUI needs
-//!   to reach the compositor, and the host's locale variables —
+//!   to reach the compositor, the host's locale variables —
 //!   `LC_ALL`, any `LC_*`, `LANG`, or `LC_ALL=C.UTF-8` where the
 //!   host set none — so gpg and git render accented names instead
-//!   of mangling them under the bare C locale, while tokens the
-//!   user exported never reach the model's shell.
+//!   of mangling them under the bare C locale, and pick's own
+//!   `PICK_*` configuration variables, like `PICK_SERVER_URL`,
+//!   while tokens the user exported never reach the model's shell.
 use crate::Project;
-use crate::sandbox::{Error, MARKER};
+use crate::sandbox::{Error, MARKER, MARKER_VALUE};
 
 use std::env;
 use std::ffi::OsString;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 
@@ -428,13 +430,23 @@ fn bwrap_args(project: &Project, home: Option<&Path>, exe: &Path) -> Vec<OsStrin
     ]);
 
     // A bare environment: no exported token reaches the model's
-    // shell.
+    // shell. The exception is pick's own `PICK_*` configuration,
+    // like `PICK_SERVER_URL`, which the user sets to point pick at
+    // a reason server. The marker is not among it: it is pick's own
+    // signal that the process is sandboxed, not configuration the
+    // user sets, so the re-execution alone provides it.
     args.extend([
         OsString::from("--clearenv"),
         OsString::from("--setenv"),
         OsString::from(MARKER),
-        OsString::from("1"),
+        OsString::from(MARKER_VALUE),
     ]);
+
+    let host_env: Vec<(OsString, OsString)> = env::vars_os().collect();
+
+    for (name, value) in pick_vars(&host_env) {
+        args.extend([OsString::from("--setenv"), name, value]);
+    }
 
     if let Some(value) = env::var_os("PATH") {
         args.extend([OsString::from("--setenv"), OsString::from("PATH"), value]);
@@ -478,7 +490,6 @@ fn bwrap_args(project: &Project, home: Option<&Path>, exe: &Path) -> Vec<OsStrin
     // configuration into the sandbox; the host root is the sandbox
     // root, so the locale data is present. Where the host set
     // nothing, fall back to `C.UTF-8`.
-    let host_env: Vec<(OsString, OsString)> = env::vars_os().collect();
     for (name, value) in locale_vars(&host_env) {
         args.extend([OsString::from("--setenv"), name, value]);
     }
@@ -486,6 +497,20 @@ fn bwrap_args(project: &Project, home: Option<&Path>, exe: &Path) -> Vec<OsStrin
     args.push(OsString::from("--"));
     args.push(os(exe));
     args
+}
+
+/// The `PICK_*` variables to forward into the sandbox, chosen from
+/// an environment: pick's own configuration namespace, like
+/// `PICK_SERVER_URL`, which the user may set to point pick at a
+/// reason server. The [`MARKER`] is pick's own signal that the
+/// process is sandboxed, not configuration the user sets, so it is
+/// left out; an empty value is treated as unset, like the locale
+/// variables.
+fn pick_vars(vars: &[(OsString, OsString)]) -> impl Iterator<Item = (OsString, OsString)> {
+    vars.iter()
+        .filter(|(name, _)| name.as_bytes().starts_with(b"PICK_") && name.as_os_str() != MARKER)
+        .filter(|(_, value)| !value.is_empty())
+        .cloned()
 }
 
 /// The locale variables to forward into the sandbox, chosen from an
@@ -1041,6 +1066,16 @@ mod tests {
                 "missing {name}"
             );
         }
+
+        // The marker is the re-execution's own signal: even when
+        // the host environment happens to set it, it is not
+        // forwarded, so it is named exactly once.
+        assert_eq!(
+            args.iter()
+                .filter(|arg| arg.as_str() == "PICK_SANDBOXED")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1450,5 +1485,59 @@ mod tests {
                 "missing --setenv {name}={value}"
             );
         }
+    }
+
+    #[test]
+    fn pick_vars_forward_the_namespaced_configuration() {
+        let vars = [
+            (
+                OsString::from("PICK_SERVER_URL"),
+                OsString::from("http://10.0.0.1:9931"),
+            ),
+            (OsString::from(MARKER), OsString::from(MARKER_VALUE)),
+            (OsString::from("PICK"), OsString::from("bare")),
+            (
+                OsString::from("PICKER_URL"),
+                OsString::from("http://elsewhere"),
+            ),
+            (OsString::from("PATH"), OsString::from("/usr/bin")),
+        ];
+
+        assert_eq!(
+            pick_vars(&vars).collect::<Vec<_>>(),
+            vec![(
+                OsString::from("PICK_SERVER_URL"),
+                OsString::from("http://10.0.0.1:9931")
+            )]
+        );
+    }
+
+    #[test]
+    fn pick_vars_treat_an_empty_value_as_unset() {
+        let vars = [(OsString::from("PICK_SERVER_URL"), OsString::from(""))];
+
+        assert!(pick_vars(&vars).next().is_none());
+    }
+
+    #[test]
+    fn pick_vars_reach_the_bwrap_arguments() {
+        // The test environment may have no `PICK_*` variable, so
+        // set one the test owns: the assertion must not depend on
+        // the machine it runs on. The name is picked so no other
+        // assertion in the suite could match a stray copy of it.
+        unsafe {
+            env::set_var("PICK_TEST_FORWARD", "forwarded");
+        }
+
+        let args = rendered(&bwrap_args(&project(), Some(&home()), &exe()));
+
+        unsafe {
+            env::remove_var("PICK_TEST_FORWARD");
+        }
+
+        assert!(
+            args.windows(3)
+                .any(|window| window == ["--setenv", "PICK_TEST_FORWARD", "forwarded"])
+        );
     }
 }

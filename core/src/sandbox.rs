@@ -15,8 +15,9 @@
 //!   remounted;
 //! - the environment is cleared down to `PATH`, `HOME`, `USER`,
 //!   the ssh-agent socket variable, the display variables the GUI
-//!   needs, and the host's locale variables, so tokens the user
-//!   exported never reach the model's shell.
+//!   needs, the host's locale variables, and pick's own `PICK_*`
+//!   configuration, so tokens the user exported never reach the
+//!   model's shell.
 //!
 //! Only Linux is supported today, where the sandbox is a
 //! bubblewrap invocation; other platforms get [`Error::Unsupported`].
@@ -24,10 +25,13 @@
 //! [`enter`] is called once from `main`. When the re-execution
 //! succeeds it does not return: the process image is replaced, and
 //! the new process re-enters `main` with the `PICK_SANDBOXED`
-//! environment variable set, where it becomes a no-op. When a
-//! sandbox cannot be started, it reports why, so `main` can panic
-//! rather than keep running bare; the `--we-doin-it-live` flag skips
-//! the sandbox entirely.
+//! environment variable set to `1`, where it becomes a no-op. The
+//! check is on the value, not the variable's presence, so a
+//! `PICK_SANDBOXED` the host environment happens to set to anything
+//! but `1` cannot skip the sandbox. When a sandbox cannot be
+//! started, it reports why, so `main` can panic rather than keep
+//! running bare; the `--we-doin-it-live` flag skips the sandbox
+//! entirely.
 use crate::Project;
 
 use std::env;
@@ -40,6 +44,11 @@ mod linux;
 /// so the re-executed process does not sandbox itself again.
 const MARKER: &str = "PICK_SANDBOXED";
 
+/// The value the re-execution sets the marker to, and the only
+/// value [`already_sandboxed`] accepts: a marker the host
+/// environment sets to anything else is not the re-execution's.
+const MARKER_VALUE: &str = "1";
+
 /// Re-executes the process under a sandbox in which `project`,
 /// the directory the tools operate in, the project's data
 /// directory, and the user's projects directory are the only
@@ -48,7 +57,7 @@ const MARKER: &str = "PICK_SANDBOXED";
 ///
 /// See the module documentation for the policy.
 pub fn enter(_project: &Project) -> Result<(), Error> {
-    if env::var_os(MARKER).is_some() {
+    if already_sandboxed() {
         return Ok(());
     }
 
@@ -108,5 +117,44 @@ impl fmt::Display for Error {
             }
             Self::Exec(detail) => write!(f, "the sandbox re-execution failed: {detail}"),
         }
+    }
+}
+
+/// Whether this process is the sandboxed re-execution, which the
+/// re-execution marks by setting the marker to [`MARKER_VALUE`].
+/// The check is on the value, not the variable's presence, so a
+/// `PICK_SANDBOXED` the host environment happens to set — a leak
+/// from debugging, say — cannot skip the sandbox.
+fn already_sandboxed() -> bool {
+    env::var_os(MARKER).is_some_and(|value| value.as_os_str() == MARKER_VALUE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_marker_only_counts_at_its_own_value() {
+        // The test binary is not sandboxed, so start from the
+        // variable being absent and leave it absent.
+        unsafe {
+            env::remove_var(MARKER);
+        }
+        assert!(!already_sandboxed());
+
+        unsafe {
+            env::set_var(MARKER, "0");
+        }
+        assert!(!already_sandboxed());
+
+        unsafe {
+            env::set_var(MARKER, MARKER_VALUE);
+        }
+        assert!(already_sandboxed());
+
+        unsafe {
+            env::remove_var(MARKER);
+        }
+        assert!(!already_sandboxed());
     }
 }
