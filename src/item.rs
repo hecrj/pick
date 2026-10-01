@@ -7,15 +7,13 @@ use crate::locale;
 use crate::markdown::{self, Markdown};
 use crate::repository;
 use crate::tool;
-use crate::widget;
+use crate::widget::{self, collapsible};
 
 use iced::border;
 use iced::padding;
 use iced::time;
 use iced::widget::operation;
-use iced::widget::{
-    Text, center_x, column, container, progress_bar, right, row, scrollable, stack, text,
-};
+use iced::widget::{Text, center_x, column, container, progress_bar, right, row, scrollable, text};
 use iced::{Center, Fill, Fit, Font, Pixels, Task, Theme, Widget, never};
 
 use function::Binary;
@@ -61,11 +59,11 @@ impl Item {
         }
     }
 
-    pub fn view(&self, project: &Project, compact: bool) -> impl Widget<Message> {
+    pub fn view<'a>(&'a self, project: &'a Project, compact: bool) -> impl Widget<Message> + 'a {
         match self {
             Item::Assistant(reply) => {
                 let reasoning = if !compact && !reply.reasoning.is_empty() {
-                    Some(reasoning(reply))
+                    Some(reasoning(reply, compact))
                 } else {
                     None
                 };
@@ -96,145 +94,159 @@ impl Item {
                 const TOOL_LOG_LINE_HEIGHT: f32 = 18.0;
                 const MAX_TOOL_LOG_HEIGHT: f32 = TOOL_LOG_LINE_HEIGHT * 10.0 + 5.0 * 9.0; // 10 lines: 10 × 18px + 9 × 5px spacing
 
-                let header = {
+                let header = |_open| {
                     let label = container(text(&tool.call.name).size(font::SMALL))
                         .padding([2, 5])
                         .style(container::dark);
 
-                    let title = tool
-                        .state
-                        .as_ref()
-                        .ok()
-                        .and_then(|state| Some(text(state.title(project)?).size(font::SMALL)));
+                    let title = tool.state.as_ref().ok().and_then(|state| {
+                        Some(text!("{}", state.title(project)?).size(font::SMALL).style(
+                            |theme: &Theme| text::Style {
+                                color: match &tool.status {
+                                    Status::Running { .. } => Some(theme.seed().warning),
+                                    Status::Success { .. } => None,
+                                    Status::Error { .. } | Status::Invalid | Status::Aborted => {
+                                        Some(theme.seed().danger)
+                                    }
+                                },
+                                selection: None,
+                            },
+                        ))
+                    });
 
-                    row![label, title].spacing(10).align_y(Center)
+                    row![label, title].width(Fill).spacing(10).align_y(Center)
                 };
 
-                let arguments = match &tool.state {
-                    Ok(state) => state
-                        .view()
-                        .map(|state| {
-                            container(state.map(never)).width(Fill).style(|_theme| {
-                                container::Style::default().background(tool::BACKGROUND)
+                let content = || {
+                    let arguments = match &tool.state {
+                        Ok(state) => state
+                            .view()
+                            .map(|state| {
+                                container(state.map(never)).width(Fill).style(|_theme| {
+                                    container::Style::default().background(tool::BACKGROUND)
+                                })
                             })
-                        })
-                        .boxed(),
-                    Err(error) => text!("{error}")
-                        .size(font::SMALL)
-                        .style(text::danger)
-                        .boxed(),
-                };
+                            .boxed(),
+                        Err(error) => text!("{error}")
+                            .size(font::SMALL)
+                            .style(text::danger)
+                            .boxed(),
+                    };
 
-                let output = match &tool.status {
-                    Status::Running { logs, .. } => Some(
-                        scrollable(
-                            column(logs.iter().map(|line| {
+                    let output = match &tool.status {
+                        Status::Running { logs, .. } => Some(
+                            scrollable(
+                                column(logs.iter().map(|line| {
+                                    text(&line[..line.floor_char_boundary(200)])
+                                        .wrapping(text::Wrapping::None)
+                                        .ellipsis(text::Ellipsis::End)
+                                        .size(font::SMALL)
+                                        .line_height(Pixels(TOOL_LOG_LINE_HEIGHT))
+                                }))
+                                .spacing(5),
+                            )
+                            .id(tool.call.id.as_str().to_owned())
+                            .width(Fill)
+                            .height(Fit.max(MAX_TOOL_LOG_HEIGHT))
+                            .on_scroll(widget::snap.with(operation::Animation::Auto))
+                            .spacing(10)
+                            .boxed(),
+                        ),
+                        Status::Success { output } if output.lines() > 0 => {
+                            /// The first and last lines a long finished output
+                            /// keeps; the middle is elided
+                            const HEAD: usize = 2;
+                            const TAIL: usize = 3;
+
+                            fn line(line: &str) -> Text<'_> {
                                 text(&line[..line.floor_char_boundary(200)])
                                     .wrapping(text::Wrapping::None)
                                     .ellipsis(text::Ellipsis::End)
                                     .size(font::SMALL)
-                                    .line_height(Pixels(TOOL_LOG_LINE_HEIGHT))
-                            }))
-                            .spacing(5),
-                        )
-                        .id(tool.call.id.as_str().to_owned())
-                        .width(Fill)
-                        .height(Fit.max(MAX_TOOL_LOG_HEIGHT))
-                        .on_scroll(widget::snap.with(operation::Animation::Auto))
-                        .spacing(10)
-                        .boxed(),
-                    ),
-                    Status::Success { output } if output.lines() > 0 => {
-                        /// The first and last lines a long finished output
-                        /// keeps; the middle is elided
-                        const HEAD: usize = 2;
-                        const TAIL: usize = 3;
+                            }
 
-                        fn line(line: &str) -> Text<'_> {
-                            text(&line[..line.floor_char_boundary(200)])
-                                .wrapping(text::Wrapping::None)
-                                .ellipsis(text::Ellipsis::End)
-                                .size(font::SMALL)
+                            let total = output.lines();
+
+                            Some(
+                                if total > HEAD + TAIL {
+                                    let elided = total - HEAD - TAIL;
+
+                                    let marker = match elided {
+                                        1 => "... 1 line elided".to_owned(),
+                                        elided => {
+                                            format!(
+                                                "... {} lines elided",
+                                                locale::thousands(elided as u64)
+                                            )
+                                        }
+                                    };
+
+                                    column(
+                                        output
+                                            .head(HEAD)
+                                            .map(line)
+                                            .chain([text(marker)
+                                                .size(font::SMALL)
+                                                .style(text::secondary)])
+                                            .chain(output.tail(TAIL).map(line)),
+                                    )
+                                    .spacing(5)
+                                } else {
+                                    column(output.all().map(line))
+                                }
+                                .spacing(5)
+                                .boxed(),
+                            )
                         }
+                        Status::Success { .. }
+                        | Status::Error { .. }
+                        | Status::Invalid
+                        | Status::Aborted => tool.status.content().map(|content| {
+                            let trimmed = content.trim();
 
-                        let total = output.lines();
+                            text(if trimmed.is_empty() {
+                                "[No output]".to_owned()
+                            } else {
+                                trimmed.to_owned()
+                            })
+                            .size(font::SMALL)
+                            .boxed()
+                        }),
+                    };
 
-                        Some(
-                            if total > HEAD + TAIL {
-                                let elided = total - HEAD - TAIL;
+                    let output = output.map(|output| {
+                        container(output)
+                            .width(Fill)
+                            .padding(10)
+                            .style(|theme: &Theme| {
+                                let palette = theme.seed();
 
-                                let marker = match elided {
-                                    1 => "... 1 line elided".to_owned(),
-                                    elided => {
-                                        format!(
-                                            "... {} lines elided",
-                                            locale::thousands(elided as u64)
-                                        )
+                                let color = match tool.status {
+                                    Status::Running { .. } => palette.warning,
+                                    Status::Success { .. } => palette.success.scale_alpha(0.5),
+                                    Status::Invalid | Status::Aborted | Status::Error { .. } => {
+                                        palette.danger
                                     }
                                 };
 
-                                column(
-                                    output
-                                        .head(HEAD)
-                                        .map(line)
-                                        .chain([text(marker)
-                                            .size(font::SMALL)
-                                            .style(text::secondary)])
-                                        .chain(output.tail(TAIL).map(line)),
-                                )
-                                .spacing(5)
-                            } else {
-                                column(output.all().map(line))
-                            }
-                            .spacing(5)
-                            .boxed(),
-                        )
-                    }
-                    Status::Success { .. }
-                    | Status::Error { .. }
-                    | Status::Invalid
-                    | Status::Aborted => tool.status.content().map(|content| {
-                        let trimmed = content.trim();
+                                let mut style = container::dark(theme);
+                                style.border = style.border.color(color).width(1);
+                                style
+                            })
+                    });
 
-                        text(if trimmed.is_empty() {
-                            "[No output]".to_owned()
-                        } else {
-                            trimmed.to_owned()
-                        })
-                        .size(font::SMALL)
-                        .boxed()
-                    }),
-                };
-
-                let output = output.map(|output| {
-                    container(output)
-                        .width(Fill)
-                        .padding(10)
-                        .style(|theme: &Theme| {
-                            let palette = theme.seed();
-
-                            let color = match tool.status {
-                                Status::Running { .. } => palette.warning,
-                                Status::Success { .. } => palette.success.scale_alpha(0.5),
-                                Status::Invalid | Status::Aborted | Status::Error { .. } => {
-                                    palette.danger
-                                }
-                            };
-
-                            let mut style = container::dark(theme);
-                            style.border = style.border.color(color).width(1);
-                            style
-                        })
-                });
-
-                container(
                     column![
-                        header.padding(padding::all(10).bottom(0)),
                         arguments,
                         output.map(|output| container(output).padding(padding::all(10).top(0)))
                     ]
-                    .spacing(10),
-                )
+                    .spacing(10)
+                };
+
+                container(collapsible(
+                    !compact,
+                    move |open| header(open).padding(10),
+                    content,
+                ))
                 .width(Fill)
                 .padding(1)
                 .style(container::bordered_box)
@@ -391,12 +403,12 @@ pub fn upload(reply: &Reply, force: bool) -> Option<impl Widget<Message>> {
     ))
 }
 
-pub fn reasoning(reply: &Reply) -> impl Widget<Message> {
-    const MAX_HEIGHT: f32 = font::SMALL * 1.5 * 15.0; // 15 lines
+pub fn reasoning(reply: &Reply, compact: bool) -> impl Widget<Message> {
+    const MAX_HEIGHT: f32 = font::SMALL * 1.5 * 10.0; // 10 lines
 
     let is_done = !reply.content.is_empty() || !reply.tool_calls.is_empty();
 
-    let header = container(
+    let header = move || {
         match reply.timings {
             Some(timings) => {
                 if is_done {
@@ -408,41 +420,27 @@ pub fn reasoning(reply: &Reply) -> impl Widget<Message> {
             None => text(if is_done { "Thought" } else { "Thinking..." }),
         }
         .size(font::SMALL)
-        .font(font::BOLD),
-    )
-    .width(Fill)
-    .padding(padding::bottom(10))
-    .style(|theme: &Theme| {
-        use iced::Color;
-        use iced::gradient;
-
-        let palette = theme.palette();
-
-        container::Style {
-            background: Some(
-                gradient::Linear::new(0)
-                    .add_stop(0.0, Color::TRANSPARENT)
-                    .add_stop(0.4, palette.background.weakest.color)
-                    .into(),
-            ),
-            ..container::Style::default()
-        }
-    });
-
-    container(stack![
-        scrollable(
-            container(
-                markdown::view(reply.reasoning.items(), Font::MONOSPACE, font::SMALL)
-                    .map(Message::LinkClicked)
-            )
-            .padding(padding::top(font::SMALL * 1.375 + 10.0)),
-        )
+        .font(font::BOLD)
         .width(Fill)
-        .height(Fit.max(MAX_HEIGHT))
-        .spacing(10)
-        .on_scroll(widget::snap.with(operation::Animation::Instant)),
-        header,
-    ])
+    };
+
+    container(collapsible(
+        !compact,
+        move |_open| header(),
+        move || {
+            container(
+                scrollable(
+                    markdown::view(reply.reasoning.items(), Font::MONOSPACE, font::SMALL)
+                        .map(Message::LinkClicked),
+                )
+                .width(Fill)
+                .height(Fit.max(MAX_HEIGHT))
+                .spacing(10)
+                .on_scroll(widget::snap.with(operation::Animation::Instant)),
+            )
+            .padding(padding::top(10))
+        },
+    ))
     .padding(10)
     .style(summary)
 }

@@ -20,7 +20,10 @@ pub fn snap<Message>(
 
     if matches!(
         scroll.source,
-        scrollable::Source::Scrollbar | scrollable::Source::AutoScroll
+        scrollable::Source::Scrollbar
+            | scrollable::Source::AutoScroll
+            | scrollable::Source::Operation
+            | scrollable::Source::Wheel
     ) {
         return scrollable::Action::None;
     }
@@ -225,10 +228,14 @@ where
 
             column![
                 button((self.base)(open).map(Event::Custom))
-                    .on_press(Event::Toggle)
+                    .on_press_maybe((!self.force_open).then_some(Event::Toggle))
                     .padding(0)
-                    .style(|theme: &Theme, _status| button::Style {
-                        text_color: theme.seed().text,
+                    .style(move |theme: &Theme, status| button::Style {
+                        text_color: if open || status == button::Status::Hovered {
+                            theme.seed().text
+                        } else {
+                            theme.palette().secondary.strong.color
+                        },
                         ..button::Style::default()
                     }),
                 open.then(&self.content)
@@ -242,4 +249,8 @@ where
         base,
         content,
     })
+}
+
+pub fn arrow(open: bool) -> &'static str {
+    if open { "▾" } else { "▸" }
 }

@@ -289,7 +289,7 @@ impl Piolet {
 
                 Task::batch([
                     work,
-                    operation::snap_to_end("scroll", operation::Animation::Auto),
+                    operation::scrollable::snap_to_end("scroll", operation::Animation::Auto),
                 ])
             }
             Message::ReplyProgressed(event) => {
@@ -515,7 +515,7 @@ impl Piolet {
                     self.abort();
 
                     Task::batch([
-                        operation::snap_to_end("scroll", operation::Animation::Instant),
+                        operation::scrollable::snap_to_end("scroll", operation::Animation::Instant),
                         self.work(),
                     ])
                 }
@@ -523,7 +523,7 @@ impl Piolet {
                     if matches!(self.mode, Mode::Review) {
                         self.mode = Mode::Chat;
 
-                        operation::snap_to_end("scroll", operation::Animation::Instant)
+                        operation::scrollable::snap_to_end("scroll", operation::Animation::Instant)
                     } else {
                         self.mode = Mode::Review;
 
@@ -1252,21 +1252,16 @@ impl Turn {
                     messages.len() == end && reply.is_none(),
                     move |open| {
                         container(
-                            text!("{}  {}", summary, if open { "▾" } else { "▸" })
+                            text!("{}  {}", summary, widget::arrow(open))
                                 .size(font::SMALL)
-                                .font(font::BOLD)
-                                .style(move |theme: &Theme| text::Style {
-                                    color: Some(if open {
-                                        theme.seed().text
-                                    } else {
-                                        theme.palette().secondary.strong.color
-                                    }),
-                                    selection: None,
-                                }),
+                                .font(font::BOLD),
                         )
                         .width(Fill)
                         .padding(10)
-                        .style(container::bordered_box)
+                        .style(|theme| container::Style {
+                            text_color: None,
+                            ..container::bordered_box(theme)
+                        })
                     },
                     move || {
                         row![
@@ -1277,7 +1272,7 @@ impl Turn {
                                         Item::Assistant(reply) => column![
                                             item::upload(reply, i == 0),
                                             (!reply.reasoning.is_empty())
-                                                .then(|| item::reasoning(reply)),
+                                                .then(|| item::reasoning(reply, true)),
                                         ]
                                         .spacing(10)
                                         .map(Message::Item.with(start + i))
