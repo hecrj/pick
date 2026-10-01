@@ -246,7 +246,7 @@ impl Call for Read {
 #[cfg(test)]
 mod tests {
     use super::{Call, MAX_OUTPUT_BYTES, MAX_READ_BYTES, MAX_READ_LIMIT, READ_CHUNK_SIZE, Read};
-    use pick_test::Directory;
+    use piolet_test::Directory;
     use std::path::Path;
 
     /// Creates a temporary project directory holding the given
@@ -254,7 +254,7 @@ mod tests {
     fn project(test: &str, files: &[(&str, &str)]) -> Directory {
         let root = Directory::create(
             std::env::temp_dir()
-                .join(format!("pick-read-test-{}", std::process::id()))
+                .join(format!("piolet-read-test-{}", std::process::id()))
                 .join(test),
         )
         .unwrap();

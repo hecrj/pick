@@ -1,5 +1,5 @@
 [package]
-name = "pick"
+name = "piolet"
 version = "0.1.0-dev"
 edition = "2024"
 
@@ -7,7 +7,7 @@ edition = "2024"
 members = ["core", "test"]
 
 [dependencies]
-pick-core = { version = "0.1.0-dev", path = "./core" }
+piolet-core = { version = "0.1.0-dev", path = "./core" }
 
 function = "0.3"
 iced_palace = "0.15.0-dev"
@@ -32,7 +32,7 @@ tracing-subscriber.version = "0.3"
 tracing-subscriber.features = ["tracing-log"]
 
 [dev-dependencies]
-pick-test = { version = "0.1.0-dev", path = "./test" }
+piolet-test = { version = "0.1.0-dev", path = "./test" }
 
 tokio.version = "1"
 tokio.features = ["macros", "test-util"]

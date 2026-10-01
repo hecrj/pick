@@ -1,4 +1,4 @@
-use pick_core as core;
+use piolet_core as core;
 
 mod diff;
 mod font;
@@ -103,27 +103,27 @@ fn main() -> Result<(), iced::Error> {
     };
 
     let server = reason::Settings {
-        url: env::var("PICK_SERVER_URL")
+        url: env::var("PIOLET_SERVER_URL")
             .as_deref()
             .unwrap_or("http://127.0.0.1:9931")
             .parse()
             .expect("server url must be valid"),
-        api_key: env::var("PICK_SERVER_API_KEY").ok().map(reason::Key::new),
+        api_key: env::var("PIOLET_SERVER_API_KEY").ok().map(reason::Key::new),
     };
 
     iced::application(
-        move || Pick::new(&project, prompt.as_deref(), &session, &server),
-        Pick::update,
-        Pick::view,
+        move || Piolet::new(&project, prompt.as_deref(), &session, &server),
+        Piolet::update,
+        Piolet::view,
     )
-    .title("pick")
-    .subscription(Pick::subscription)
+    .title("piolet")
+    .subscription(Piolet::subscription)
     .theme(Theme::CatppuccinMocha)
     .font(Font::MONOSPACE)
     .run()
 }
 
-struct Pick {
+struct Piolet {
     project: Project,
     session: session::File,
     repository: Repository,
@@ -182,7 +182,7 @@ enum Message {
     ToggleCompact(bool),
 }
 
-impl Pick {
+impl Piolet {
     fn new(
         project: &Project,
         prompt: Option<&str>,
@@ -191,7 +191,7 @@ impl Pick {
     ) -> (Self, Task<Message>) {
         let (repository, load_repository) = repository::Repository::new(project.clone());
 
-        let mut pick = Self {
+        let mut piolet = Self {
             project: project.clone(),
             session: session.clone(),
             repository,
@@ -214,11 +214,11 @@ impl Pick {
         let boot = {
             let load = Task::perform(Session::load(session), Message::SessionLoaded);
 
-            Task::batch([pick.connect(), load])
+            Task::batch([piolet.connect(), load])
         };
 
         (
-            pick,
+            piolet,
             Task::batch([
                 if prompt.is_some() {
                     boot.chain(Task::done(Message::Send))

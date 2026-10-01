@@ -14,7 +14,7 @@
 //!   dedicated leaf under the host's temp directory — `TMPDIR` if
 //!   set, else `/tmp` — mounted at `/tmp`, so the system reaps it:
 //!   tmpfiles ages out idle leaves where it manages the directory,
-//!   and a reboot clears them on a tmpfs, instead of pick having to
+//!   and a reboot clears them on a tmpfs, instead of piolet having to
 //!   clean it up;
 //! - the home directory is replaced by a tmpfs, hiding credentials
 //!   and configuration, with only the Rust toolchain remounted;
@@ -41,8 +41,8 @@
 //!   to reach the compositor, the host's locale variables —
 //!   `LC_ALL`, any `LC_*`, `LANG`, or `LC_ALL=C.UTF-8` where the
 //!   host set none — so gpg and git render accented names instead
-//!   of mangling them under the bare C locale, and pick's own
-//!   `PICK_*` configuration variables, like `PICK_SERVER_URL`,
+//!   of mangling them under the bare C locale, and piolet's own
+//!   `PIOLET_*` configuration variables, like `PIOLET_SERVER_URL`,
 //!   while tokens the user exported never reach the model's shell.
 use crate::Project;
 use crate::sandbox::{Error, MARKER, MARKER_VALUE};
@@ -54,7 +54,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 
 /// The sandbox hostname, in the unshared uts namespace.
-const HOSTNAME: &str = "pick";
+const HOSTNAME: &str = "piolet";
 /// The bubblewrap binary, looked up on the `PATH`.
 const BINARY: &str = "bwrap";
 
@@ -139,9 +139,9 @@ fn find_on_path(name: &str, pathvar: Option<&std::ffi::OsStr>) -> Option<PathBuf
 }
 
 /// The scratchpad the sandbox's `/tmp` is backed by: a dedicated
-/// leaf under the host's temp directory, named `pick-` plus the
+/// leaf under the host's temp directory, named `piolet-` plus the
 /// project's id, the name and a hash of its path. The prefix
-/// marks the leaf as pick's in a directory it shares with other
+/// marks the leaf as piolet's in a directory it shares with other
 /// programs. The caller passes the canonical path, so the name
 /// is deterministic: the same project finds the same leaf across
 /// launches — the scratch survives a kill and a relaunch — and
@@ -150,9 +150,9 @@ fn find_on_path(name: &str, pathvar: Option<&std::ffi::OsStr>) -> Option<PathBuf
 /// Living under the host's temp directory means the system owns
 /// the leaf's lifetime: tmpfiles reaps leaves idle past its age
 /// limit where it manages the directory, and a reboot clears them
-/// where it is a tmpfs. Pick never has to clean it up.
+/// where it is a tmpfs. Piolet never has to clean it up.
 fn scratch_leaf(project: &Project) -> PathBuf {
-    env::temp_dir().join(format!("pick-{}", project.id))
+    env::temp_dir().join(format!("piolet-{}", project.id))
 }
 
 /// Creates the scratchpad leaf when missing and verifies it is
@@ -282,11 +282,11 @@ fn bwrap_args(project: &Project, home: Option<&Path>, exe: &Path) -> Vec<OsStrin
         // environment forwards `HOME` but not `XDG_DATA_HOME` —
         // looks under `$HOME/.local/share`.
         let data_dir = project.data_dir();
-        let sandbox_dir = home.join(".local/share").join("pick").join(&project.id);
+        let sandbox_dir = home.join(".local/share").join("piolet").join(&project.id);
         args.extend([OsString::from("--bind"), os(&data_dir), os(&sandbox_dir)]);
 
         // Keep the executable reachable if it lives under the hidden
-        // home and outside the project, like `~/.local/bin/pick`.
+        // home and outside the project, like `~/.local/bin/piolet`.
         if let Some(dir) = exe.parent()
             && dir.starts_with(home)
             && !dir.starts_with(project)
@@ -430,9 +430,9 @@ fn bwrap_args(project: &Project, home: Option<&Path>, exe: &Path) -> Vec<OsStrin
     ]);
 
     // A bare environment: no exported token reaches the model's
-    // shell. The exception is pick's own `PICK_*` configuration,
-    // like `PICK_SERVER_URL`, which the user sets to point pick at
-    // a reason server. The marker is not among it: it is pick's own
+    // shell. The exception is piolet's own `PIOLET_*` configuration,
+    // like `PIOLET_SERVER_URL`, which the user sets to point piolet at
+    // a reason server. The marker is not among it: it is piolet's own
     // signal that the process is sandboxed, not configuration the
     // user sets, so the re-execution alone provides it.
     args.extend([
@@ -444,7 +444,7 @@ fn bwrap_args(project: &Project, home: Option<&Path>, exe: &Path) -> Vec<OsStrin
 
     let host_env: Vec<(OsString, OsString)> = env::vars_os().collect();
 
-    for (name, value) in pick_vars(&host_env) {
+    for (name, value) in piolet_vars(&host_env) {
         args.extend([OsString::from("--setenv"), name, value]);
     }
 
@@ -499,16 +499,16 @@ fn bwrap_args(project: &Project, home: Option<&Path>, exe: &Path) -> Vec<OsStrin
     args
 }
 
-/// The `PICK_*` variables to forward into the sandbox, chosen from
-/// an environment: pick's own configuration namespace, like
-/// `PICK_SERVER_URL`, which the user may set to point pick at a
-/// reason server. The [`MARKER`] is pick's own signal that the
+/// The `PIOLET_*` variables to forward into the sandbox, chosen from
+/// an environment: piolet's own configuration namespace, like
+/// `PIOLET_SERVER_URL`, which the user may set to point piolet at a
+/// reason server. The [`MARKER`] is piolet's own signal that the
 /// process is sandboxed, not configuration the user sets, so it is
 /// left out; an empty value is treated as unset, like the locale
 /// variables.
-fn pick_vars(vars: &[(OsString, OsString)]) -> impl Iterator<Item = (OsString, OsString)> {
+fn piolet_vars(vars: &[(OsString, OsString)]) -> impl Iterator<Item = (OsString, OsString)> {
     vars.iter()
-        .filter(|(name, _)| name.as_bytes().starts_with(b"PICK_") && name.as_os_str() != MARKER)
+        .filter(|(name, _)| name.as_bytes().starts_with(b"PIOLET_") && name.as_os_str() != MARKER)
         .filter(|(_, value)| !value.is_empty())
         .cloned()
 }
@@ -693,10 +693,10 @@ fn gpu_binds(dev: &Path) -> Vec<OsString> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pick_test::Directory;
+    use piolet_test::Directory;
 
     fn project() -> Project {
-        Project::new("/home/user/code/pick", Some(home()))
+        Project::new("/home/user/code/piolet", Some(home()))
     }
 
     fn home() -> PathBuf {
@@ -704,7 +704,7 @@ mod tests {
     }
 
     fn exe() -> PathBuf {
-        PathBuf::from("/usr/local/bin/pick")
+        PathBuf::from("/usr/local/bin/piolet")
     }
 
     /// Renders the argument list as strings for assertions.
@@ -720,7 +720,7 @@ mod tests {
         // writability assertion must not depend on the machine it
         // runs on.
         let root = std::env::temp_dir()
-            .join(format!("pick-sandbox-root-{}", std::process::id()))
+            .join(format!("piolet-sandbox-root-{}", std::process::id()))
             .join("home");
         std::fs::create_dir_all(&root).unwrap();
 
@@ -756,7 +756,7 @@ mod tests {
         let data_dir = project.data_dir().to_string_lossy().into_owned();
         let sandbox_data_dir = root
             .join(".local/share")
-            .join("pick")
+            .join("piolet")
             .join(&project.id)
             .to_string_lossy()
             .into_owned();
@@ -765,7 +765,7 @@ mod tests {
             [
                 vec!["--bind", scratch.as_str(), "/tmp"],
                 vec!["--bind", data_dir.as_str(), sandbox_data_dir.as_str()],
-                vec!["--bind", "/home/user/code/pick", "/home/user/code/pick",],
+                vec!["--bind", "/home/user/code/piolet", "/home/user/code/piolet",],
             ]
         );
     }
@@ -779,7 +779,7 @@ mod tests {
     }
 
     #[test]
-    fn the_scratch_leaf_name_is_prefixed_with_pick() {
+    fn the_scratch_leaf_name_is_prefixed_with_piolet() {
         let project = project();
         assert_eq!(
             scratch_leaf(&project)
@@ -787,7 +787,7 @@ mod tests {
                 .unwrap()
                 .to_str()
                 .unwrap(),
-            format!("pick-{}", project.id)
+            format!("piolet-{}", project.id)
         );
     }
 
@@ -795,7 +795,8 @@ mod tests {
     fn the_scratch_leaf_is_created_private() {
         use std::os::unix::fs::PermissionsExt;
 
-        let leaf = std::env::temp_dir().join(format!("pick-scratch-create-{}", std::process::id()));
+        let leaf =
+            std::env::temp_dir().join(format!("piolet-scratch-create-{}", std::process::id()));
 
         let result = prepare_scratch(&leaf);
 
@@ -814,7 +815,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let leaf = Directory::create(
-            std::env::temp_dir().join(format!("pick-scratch-existing-{}", std::process::id())),
+            std::env::temp_dir().join(format!("piolet-scratch-existing-{}", std::process::id())),
         )
         .unwrap();
         std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -836,9 +837,9 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let leaf =
-            std::env::temp_dir().join(format!("pick-scratch-symlink-{}", std::process::id()));
+            std::env::temp_dir().join(format!("piolet-scratch-symlink-{}", std::process::id()));
         let target = Directory::create(
-            std::env::temp_dir().join(format!("pick-scratch-target-{}", std::process::id())),
+            std::env::temp_dir().join(format!("piolet-scratch-target-{}", std::process::id())),
         )
         .unwrap();
         symlink(&target, &leaf).unwrap();
@@ -856,7 +857,7 @@ mod tests {
 
     #[test]
     fn a_planted_file_at_the_scratch_leaf_is_refused() {
-        let leaf = std::env::temp_dir().join(format!("pick-scratch-file-{}", std::process::id()));
+        let leaf = std::env::temp_dir().join(format!("piolet-scratch-file-{}", std::process::id()));
         std::fs::write(&leaf, "").unwrap();
 
         let result = prepare_scratch(&leaf);
@@ -880,7 +881,7 @@ mod tests {
     #[test]
     fn the_toolchain_is_remounted_when_present() {
         let root = std::env::temp_dir()
-            .join(format!("pick-sandbox-test-{}", std::process::id()))
+            .join(format!("piolet-sandbox-test-{}", std::process::id()))
             .join("home");
         std::fs::create_dir_all(root.join(".cargo")).unwrap();
 
@@ -899,7 +900,7 @@ mod tests {
     #[test]
     fn the_projects_directory_is_bound_writable_when_present() {
         let root = std::env::temp_dir()
-            .join(format!("pick-sandbox-projects-{}", std::process::id()))
+            .join(format!("piolet-sandbox-projects-{}", std::process::id()))
             .join("home");
         std::fs::create_dir_all(root.join("projects")).unwrap();
 
@@ -915,7 +916,10 @@ mod tests {
     #[test]
     fn the_projects_directory_is_not_bound_when_absent() {
         let root = std::env::temp_dir()
-            .join(format!("pick-sandbox-projects-none-{}", std::process::id()))
+            .join(format!(
+                "piolet-sandbox-projects-none-{}",
+                std::process::id()
+            ))
             .join("home");
         std::fs::create_dir_all(&root).unwrap();
 
@@ -956,10 +960,10 @@ mod tests {
         }
 
         let root = std::env::temp_dir()
-            .join(format!("pick-sandbox-live-{}", std::process::id()))
+            .join(format!("piolet-sandbox-live-{}", std::process::id()))
             .join("home");
         let sibling = root.join("projects").join("sibling");
-        let project = root.join("projects").join("pick");
+        let project = root.join("projects").join("piolet");
         std::fs::create_dir_all(&sibling).unwrap();
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(sibling.join("note.txt"), "reference\n").unwrap();
@@ -972,7 +976,7 @@ mod tests {
 
         let mut args = bwrap_args(&project, Some(&root), &exe());
         args.truncate(args.len() - 2); // Drop the `--` and the executable.
-        let sandbox_data_dir = root.join(".local/share").join("pick").join(&project.id);
+        let sandbox_data_dir = root.join(".local/share").join("piolet").join(&project.id);
         let probe = format!(
             "test -f {s} && echo SIBLING_READABLE; \
              touch {p}/scratch 2>/dev/null && echo PROJECT_WRITABLE; \
@@ -1022,7 +1026,7 @@ mod tests {
         let args = rendered(&bwrap_args(
             &project(),
             Some(&home()),
-            &home().join(".local/bin/pick"),
+            &home().join(".local/bin/piolet"),
         ));
 
         assert!(
@@ -1036,11 +1040,11 @@ mod tests {
         let args = rendered(&bwrap_args(
             &project(),
             Some(&home()),
-            &project().join("target/debug/pick"),
+            &project().join("target/debug/piolet"),
         ));
 
         assert!(!args.windows(3).any(|window| {
-            window[0] == "--ro-bind" && window[1] == "/home/user/code/pick/target/debug"
+            window[0] == "--ro-bind" && window[1] == "/home/user/code/piolet/target/debug"
         }));
     }
 
@@ -1050,7 +1054,7 @@ mod tests {
 
         let (penultimate, last) = (&args[args.len() - 2], &args[args.len() - 1]);
         assert_eq!(penultimate, "--");
-        assert_eq!(last, "/usr/local/bin/pick");
+        assert_eq!(last, "/usr/local/bin/piolet");
     }
 
     #[test]
@@ -1059,7 +1063,7 @@ mod tests {
 
         assert!(args.contains(&"--clearenv".to_owned()));
 
-        for name in ["PICK_SANDBOXED", "PATH", "HOME"] {
+        for name in ["PIOLET_SANDBOXED", "PATH", "HOME"] {
             assert!(
                 args.windows(3)
                     .any(|window| window[0] == "--setenv" && window[1] == name),
@@ -1072,7 +1076,7 @@ mod tests {
         // forwarded, so it is named exactly once.
         assert_eq!(
             args.iter()
-                .filter(|arg| arg.as_str() == "PICK_SANDBOXED")
+                .filter(|arg| arg.as_str() == "PIOLET_SANDBOXED")
                 .count(),
             1
         );
@@ -1097,7 +1101,7 @@ mod tests {
     #[test]
     fn finds_the_binary_on_the_path() {
         let dir =
-            std::env::temp_dir().join(format!("pick-sandbox-path-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("piolet-sandbox-path-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
 
         let binary = dir.join("bwrap");
@@ -1132,7 +1136,7 @@ mod tests {
     #[test]
     fn the_gpu_devices_are_bound_when_present() {
         let dev =
-            std::env::temp_dir().join(format!("pick-sandbox-gpu-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("piolet-sandbox-gpu-test-{}", std::process::id()));
         std::fs::create_dir_all(dev.join("dri")).unwrap();
         std::fs::write(dev.join("nvidiactl"), "").unwrap();
         std::fs::write(dev.join("nvidia0"), "").unwrap();
@@ -1168,7 +1172,7 @@ mod tests {
     #[test]
     fn an_empty_dev_needs_no_gpu_binds() {
         let dev = std::env::temp_dir().join(format!(
-            "pick-sandbox-gpu-empty-test-{}",
+            "piolet-sandbox-gpu-empty-test-{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dev).unwrap();
@@ -1213,7 +1217,7 @@ mod tests {
     #[test]
     fn the_known_host_keys_are_bound_when_present() {
         let root = std::env::temp_dir()
-            .join(format!("pick-sandbox-ssh-test-{}", std::process::id()))
+            .join(format!("piolet-sandbox-ssh-test-{}", std::process::id()))
             .join("home");
         std::fs::create_dir_all(root.join(".ssh")).unwrap();
         std::fs::write(
@@ -1239,7 +1243,7 @@ mod tests {
     fn the_known_host_keys_are_not_bound_when_absent() {
         let root = std::env::temp_dir()
             .join(format!(
-                "pick-sandbox-ssh-empty-test-{}",
+                "piolet-sandbox-ssh-empty-test-{}",
                 std::process::id()
             ))
             .join("home");
@@ -1290,7 +1294,7 @@ mod tests {
     #[test]
     fn the_ssh_signing_files_are_bound_when_configured() {
         let root = std::env::temp_dir()
-            .join(format!("pick-sandbox-ssh-sign-{}", std::process::id()))
+            .join(format!("piolet-sandbox-ssh-sign-{}", std::process::id()))
             .join("home");
         let (home, pub_key, signers) = ssh_signing_home(&root);
         std::fs::write(
@@ -1319,7 +1323,10 @@ mod tests {
     #[test]
     fn the_signers_file_is_found_in_subsection_form() {
         let root = std::env::temp_dir()
-            .join(format!("pick-sandbox-ssh-sign-sub-{}", std::process::id()))
+            .join(format!(
+                "piolet-sandbox-ssh-sign-sub-{}",
+                std::process::id()
+            ))
             .join("home");
         let (home, pub_key, signers) = ssh_signing_home(&root);
         std::fs::write(
@@ -1350,7 +1357,10 @@ mod tests {
         // In openpgp form `user.signingkey` is a fingerprint, not a
         // file, so no ssh-signing bind may appear for it.
         let root = std::env::temp_dir()
-            .join(format!("pick-sandbox-ssh-sign-fpr-{}", std::process::id()))
+            .join(format!(
+                "piolet-sandbox-ssh-sign-fpr-{}",
+                std::process::id()
+            ))
             .join("home");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
@@ -1368,7 +1378,10 @@ mod tests {
     #[test]
     fn a_home_without_gitconfig_binds_no_ssh_signing() {
         let root = std::env::temp_dir()
-            .join(format!("pick-sandbox-ssh-sign-none-{}", std::process::id()))
+            .join(format!(
+                "piolet-sandbox-ssh-sign-none-{}",
+                std::process::id()
+            ))
             .join("home");
         std::fs::create_dir_all(&root).unwrap();
 
@@ -1488,56 +1501,56 @@ mod tests {
     }
 
     #[test]
-    fn pick_vars_forward_the_namespaced_configuration() {
+    fn piolet_vars_forward_the_namespaced_configuration() {
         let vars = [
             (
-                OsString::from("PICK_SERVER_URL"),
+                OsString::from("PIOLET_SERVER_URL"),
                 OsString::from("http://10.0.0.1:9931"),
             ),
             (OsString::from(MARKER), OsString::from(MARKER_VALUE)),
-            (OsString::from("PICK"), OsString::from("bare")),
+            (OsString::from("PIOLET"), OsString::from("bare")),
             (
-                OsString::from("PICKER_URL"),
+                OsString::from("PIOLETTA_URL"),
                 OsString::from("http://elsewhere"),
             ),
             (OsString::from("PATH"), OsString::from("/usr/bin")),
         ];
 
         assert_eq!(
-            pick_vars(&vars).collect::<Vec<_>>(),
+            piolet_vars(&vars).collect::<Vec<_>>(),
             vec![(
-                OsString::from("PICK_SERVER_URL"),
+                OsString::from("PIOLET_SERVER_URL"),
                 OsString::from("http://10.0.0.1:9931")
             )]
         );
     }
 
     #[test]
-    fn pick_vars_treat_an_empty_value_as_unset() {
-        let vars = [(OsString::from("PICK_SERVER_URL"), OsString::from(""))];
+    fn piolet_vars_treat_an_empty_value_as_unset() {
+        let vars = [(OsString::from("PIOLET_SERVER_URL"), OsString::from(""))];
 
-        assert!(pick_vars(&vars).next().is_none());
+        assert!(piolet_vars(&vars).next().is_none());
     }
 
     #[test]
-    fn pick_vars_reach_the_bwrap_arguments() {
-        // The test environment may have no `PICK_*` variable, so
+    fn piolet_vars_reach_the_bwrap_arguments() {
+        // The test environment may have no `PIOLET_*` variable, so
         // set one the test owns: the assertion must not depend on
         // the machine it runs on. The name is picked so no other
         // assertion in the suite could match a stray copy of it.
         unsafe {
-            env::set_var("PICK_TEST_FORWARD", "forwarded");
+            env::set_var("PIOLET_TEST_FORWARD", "forwarded");
         }
 
         let args = rendered(&bwrap_args(&project(), Some(&home()), &exe()));
 
         unsafe {
-            env::remove_var("PICK_TEST_FORWARD");
+            env::remove_var("PIOLET_TEST_FORWARD");
         }
 
         assert!(
             args.windows(3)
-                .any(|window| window == ["--setenv", "PICK_TEST_FORWARD", "forwarded"])
+                .any(|window| window == ["--setenv", "PIOLET_TEST_FORWARD", "forwarded"])
         );
     }
 }

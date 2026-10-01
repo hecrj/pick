@@ -15,7 +15,7 @@
 //!   remounted;
 //! - the environment is cleared down to `PATH`, `HOME`, `USER`,
 //!   the ssh-agent socket variable, the display variables the GUI
-//!   needs, the host's locale variables, and pick's own `PICK_*`
+//!   needs, the host's locale variables, and piolet's own `PIOLET_*`
 //!   configuration, so tokens the user exported never reach the
 //!   model's shell.
 //!
@@ -24,10 +24,10 @@
 //!
 //! [`enter`] is called once from `main`. When the re-execution
 //! succeeds it does not return: the process image is replaced, and
-//! the new process re-enters `main` with the `PICK_SANDBOXED`
+//! the new process re-enters `main` with the `PIOLET_SANDBOXED`
 //! environment variable set to `1`, where it becomes a no-op. The
 //! check is on the value, not the variable's presence, so a
-//! `PICK_SANDBOXED` the host environment happens to set to anything
+//! `PIOLET_SANDBOXED` the host environment happens to set to anything
 //! but `1` cannot skip the sandbox. When a sandbox cannot be
 //! started, it reports why, so `main` can panic rather than keep
 //! running bare; the `--we-doin-it-live` flag skips the sandbox
@@ -42,7 +42,7 @@ mod linux;
 
 /// The environment marker identifying an already-sandboxed process,
 /// so the re-executed process does not sandbox itself again.
-const MARKER: &str = "PICK_SANDBOXED";
+const MARKER: &str = "PIOLET_SANDBOXED";
 
 /// The value the re-execution sets the marker to, and the only
 /// value [`already_sandboxed`] accepts: a marker the host
@@ -123,7 +123,7 @@ impl fmt::Display for Error {
 /// Whether this process is the sandboxed re-execution, which the
 /// re-execution marks by setting the marker to [`MARKER_VALUE`].
 /// The check is on the value, not the variable's presence, so a
-/// `PICK_SANDBOXED` the host environment happens to set — a leak
+/// `PIOLET_SANDBOXED` the host environment happens to set — a leak
 /// from debugging, say — cannot skip the sandbox.
 fn already_sandboxed() -> bool {
     env::var_os(MARKER).is_some_and(|value| value.as_os_str() == MARKER_VALUE)

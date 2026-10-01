@@ -712,14 +712,14 @@ pub type Result<T> = ::core::result::Result<T, Error>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pick_test::Directory;
+    use piolet_test::Directory;
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     fn repo(name: &str) -> Directory {
         Directory::create(
-            std::env::temp_dir().join(format!("pick-git-{name}-{}", std::process::id())),
+            std::env::temp_dir().join(format!("piolet-git-{name}-{}", std::process::id())),
         )
         .unwrap()
     }

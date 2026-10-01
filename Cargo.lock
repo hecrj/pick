@@ -2854,42 +2854,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pick"
-version = "0.1.0-dev"
-dependencies = [
- "function",
- "iced",
- "iced_palace",
- "log",
- "pick-core",
- "pick-test",
- "reason",
- "serde",
- "serde_json",
- "similar",
- "sipper",
- "tokio",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "pick-core"
-version = "0.1.0-dev"
-dependencies = [
- "decoder",
- "dirs",
- "jiff",
- "pick-test",
- "reason",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "pick-test"
-version = "0.1.0-dev"
-
-[[package]]
 name = "pin-project"
 version = "1.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2920,6 +2884,42 @@ name = "pin-utils"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
+
+[[package]]
+name = "piolet"
+version = "0.1.0-dev"
+dependencies = [
+ "function",
+ "iced",
+ "iced_palace",
+ "log",
+ "piolet-core",
+ "piolet-test",
+ "reason",
+ "serde",
+ "serde_json",
+ "similar",
+ "sipper",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "piolet-core"
+version = "0.1.0-dev"
+dependencies = [
+ "decoder",
+ "dirs",
+ "jiff",
+ "piolet-test",
+ "reason",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "piolet-test"
+version = "0.1.0-dev"
 
 [[package]]
 name = "piper"

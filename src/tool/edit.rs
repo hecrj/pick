@@ -137,13 +137,13 @@ impl Call for Edit {
 mod tests {
     use super::*;
 
-    use pick_test::Directory;
+    use piolet_test::Directory;
 
     /// Creates the project directory of a test, seeding it with files.
     fn project(test: &str, files: &[(&str, &str)]) -> Directory {
         let root = Directory::create(
             std::env::temp_dir()
-                .join(format!("pick-edit-test-{}", std::process::id()))
+                .join(format!("piolet-edit-test-{}", std::process::id()))
                 .join(test),
         )
         .unwrap();

@@ -1,5 +1,5 @@
 [package]
-name = "pick-core"
+name = "piolet-core"
 version = "0.1.0-dev"
 edition = "2024"
 
@@ -14,7 +14,7 @@ tokio.version = "1"
 tokio.features = ["fs", "process", "rt", "sync"]
 
 [dev-dependencies]
-pick-test = { version = "0.1.0-dev", path = "../test" }
+piolet-test = { version = "0.1.0-dev", path = "../test" }
 
 tokio.version = "1"
 tokio.features = ["macros", "test-util"]

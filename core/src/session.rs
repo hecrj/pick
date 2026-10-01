@@ -672,7 +672,7 @@ mod comment {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pick_test::Directory;
+    use piolet_test::Directory;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -1006,7 +1006,7 @@ mod tests {
     #[tokio::test]
     async fn a_session_loads_what_it_appends() {
         let file =
-            File(std::env::temp_dir().join(format!("pick-session-test-{}", std::process::id())));
+            File(std::env::temp_dir().join(format!("piolet-session-test-{}", std::process::id())));
         std::fs::remove_file(&file).ok();
 
         let at = Session::append(&file, [Event::ItemAdded(Item::User("hello".to_owned()))])
@@ -1025,8 +1025,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_file_loads_an_empty_session() {
-        let file =
-            File(std::env::temp_dir().join(format!("pick-session-missing-{}", std::process::id())));
+        let file = File(
+            std::env::temp_dir().join(format!("piolet-session-missing-{}", std::process::id())),
+        );
         std::fs::remove_file(&file).ok();
 
         let session = Session::load(&file).await.expect("load missing session");
@@ -1037,7 +1038,7 @@ mod tests {
     #[tokio::test]
     async fn concurrent_appends_to_the_same_session_are_serialized() {
         let file =
-            File(std::env::temp_dir().join(format!("pick-session-race-{}", std::process::id())));
+            File(std::env::temp_dir().join(format!("piolet-session-race-{}", std::process::id())));
         std::fs::remove_file(&file).ok();
 
         let mut tasks = Vec::new();
@@ -1168,7 +1169,7 @@ mod tests {
     #[tokio::test]
     async fn a_load_answers_the_calls_a_crash_left_open() {
         let file =
-            File(std::env::temp_dir().join(format!("pick-session-crash-{}", std::process::id())));
+            File(std::env::temp_dir().join(format!("piolet-session-crash-{}", std::process::id())));
         std::fs::remove_file(&file).ok();
 
         // A batch of two, the first settled, the second still
@@ -1214,7 +1215,7 @@ mod tests {
     #[test]
     fn a_fresh_file_stays_unique_and_orderly() {
         let project = Project::new(
-            std::env::temp_dir().join(format!("pick-sessions-a-{}", std::process::id())),
+            std::env::temp_dir().join(format!("piolet-sessions-a-{}", std::process::id())),
             None,
         );
         let _data_dir = Directory::create(project.data_dir()).unwrap();
@@ -1241,7 +1242,7 @@ mod tests {
     #[test]
     fn the_latest_file_is_the_greatest_name() {
         let project = Project::new(
-            std::env::temp_dir().join(format!("pick-sessions-b-{}", std::process::id())),
+            std::env::temp_dir().join(format!("piolet-sessions-b-{}", std::process::id())),
             None,
         );
         let _data_dir = Directory::create(project.data_dir()).unwrap();
@@ -1262,7 +1263,7 @@ mod tests {
     #[test]
     fn a_missing_sessions_dir_has_no_latest_file() {
         let project = Project::new(
-            std::env::temp_dir().join(format!("pick-sessions-c-{}", std::process::id())),
+            std::env::temp_dir().join(format!("piolet-sessions-c-{}", std::process::id())),
             None,
         );
 
@@ -1272,7 +1273,7 @@ mod tests {
     #[test]
     fn an_existing_session_resolves_by_name_and_path() {
         let project = Project::new(
-            std::env::temp_dir().join(format!("pick-sessions-d-{}", std::process::id())),
+            std::env::temp_dir().join(format!("piolet-sessions-d-{}", std::process::id())),
             None,
         );
         let _data_dir = Directory::create(project.data_dir()).unwrap();
