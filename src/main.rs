@@ -1123,32 +1123,33 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
     }
 
     fn turns(&self) -> impl Iterator<Item = Turn> {
-        let mut items = self.messages.iter().enumerate().peekable();
+        let mut items = self.messages.iter().peekable();
+        let mut i = 0;
 
         std::iter::from_fn(move || {
-            let (i, item) = items.next()?;
+            let start = i;
 
-            Some(match item {
-                Item::User(_) | Item::Review(_) | Item::Compaction(_) => Turn::Standalone(i),
-                Item::Assistant(_) | Item::Tool(_) => {
-                    let mut end = i + 1;
+            Some(loop {
+                let item = items.next()?;
+                i += 1;
 
-                    while let Some((_, next)) = items.peek() {
+                match item {
+                    Item::User(_) | Item::Review(_) | Item::Compaction(_) => {
+                        break Turn::Standalone(start);
+                    }
+                    Item::Assistant(reply) if !reply.content.is_empty() => {
+                        break Turn::Work { start, end: i };
+                    }
+                    _ => {
+                        let next = items.peek();
+
                         match next {
-                            Item::User(_) | Item::Review(_) | Item::Compaction(_) => break,
-                            Item::Assistant(reply) if !reply.content.is_empty() => {
-                                let _ = items.next();
-                                end += 1;
-                                break;
+                            None | Some(Item::User(_) | Item::Review(_) | Item::Compaction(_)) => {
+                                break Turn::Work { start, end: i };
                             }
                             _ => {}
                         }
-
-                        let _ = items.next();
-                        end += 1;
                     }
-
-                    Turn::Work { start: i, end }
                 }
             })
         })
