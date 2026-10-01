@@ -102,8 +102,17 @@ fn main() -> Result<(), iced::Error> {
         None => session::File::new(&project),
     };
 
+    let server = reason::Settings {
+        url: env::var("PICK_SERVER_URL")
+            .as_deref()
+            .unwrap_or("http://127.0.0.1:9931")
+            .parse()
+            .expect("server url must be valid"),
+        api_key: env::var("PICK_SERVER_API_KEY").ok().map(reason::Key::new),
+    };
+
     iced::application(
-        move || Pick::new(&project, prompt.as_deref(), &session),
+        move || Pick::new(&project, prompt.as_deref(), &session, &server),
         Pick::update,
         Pick::view,
     )
@@ -118,7 +127,7 @@ struct Pick {
     project: Project,
     session: session::File,
     repository: Repository,
-    server: String,
+    server: reason::Settings,
     tools: BTreeMap<&'static str, Tool>,
     connection: Connection,
     tasks: HashMap<Work, task::Handle>,
@@ -178,6 +187,7 @@ impl Pick {
         project: &Project,
         prompt: Option<&str>,
         session: &session::File,
+        server: &reason::Settings,
     ) -> (Self, Task<Message>) {
         let (repository, load_repository) = repository::Repository::new(project.clone());
 
@@ -185,7 +195,7 @@ impl Pick {
             project: project.clone(),
             session: session.clone(),
             repository,
-            server: "http://127.0.0.1:9931".to_owned(),
+            server: server.clone(),
             tools: Tool::builtins(),
             connection: Connection::Disconnected,
             tasks: HashMap::new(),
@@ -532,7 +542,7 @@ impl Pick {
     fn connect(&mut self) -> Task<Message> {
         self.connection = Connection::Connecting;
 
-        Task::perform(Reason::connect(&self.server), Message::Connected)
+        Task::perform(Reason::connect(self.server.clone()), Message::Connected)
     }
 
     fn list_models(&self) -> Task<Message> {
