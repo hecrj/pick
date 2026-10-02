@@ -53,14 +53,14 @@ fn main() -> Result<(), iced::Error> {
     tracing_subscriber::fmt::init();
 
     let args: Vec<_> = env::args().collect();
-    let live = args.iter().any(|arg| arg.as_str() == LIVE);
-    let resume = args.iter().any(|arg| arg.as_str() == RESUME);
+    let live = args.iter().any(|arg| arg == LIVE);
+    let resume = args.iter().any(|arg| arg == RESUME);
 
     // `--resume [PATH]` resumes a session instead of starting a
     // fresh one: the newest one when the path is left out.
     let resume_path = args
         .iter()
-        .position(|arg| arg.as_str() == RESUME)
+        .position(|arg| arg == RESUME)
         .and_then(|i| args.get(i + 1))
         .filter(|arg| !arg.starts_with('-'))
         .cloned();
@@ -68,10 +68,7 @@ fn main() -> Result<(), iced::Error> {
     let prompt = args
         .iter()
         .skip(1)
-        .find(|arg| {
-            let arg = arg.as_str();
-            arg != LIVE && arg != RESUME && Some(arg) != resume_path.as_deref()
-        })
+        .find(|&arg| arg != LIVE && arg != RESUME && Some(arg) != resume_path.as_ref())
         .cloned();
 
     let project = Project::current_dir().expect("the current directory must be resolvable");
