@@ -1,17 +1,21 @@
 //! Exports a session as a standalone HTML document, styled by
 //! the app's theme.
 
-use crate::core::{Session, git, session};
+use crate::core::{Project, Session, git, session};
 use crate::{diff, font, highlight, item, locale, tool};
 use iced::highlighter;
 use iced::theme::palette;
-use iced::{Color, Theme};
+use iced::{Color, Theme, time};
 
 /// The static styles of the document, colored by the `:root`
 /// variables generated from the theme.
 const CSS: &str = r#"
+/* Every scrollbar — the page's, a code block's, a tool
+   output's — keeps its default size but gets a
+   border-colored thumb on a transparent track. */
 * {
     box-sizing: border-box;
+    scrollbar-color: var(--border) transparent;
 }
 
 body {
@@ -21,6 +25,17 @@ body {
     font: 15px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
+/* The same style where the standard properties are not
+   supported. */
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 4px;
+}
+
 .session {
     max-width: 770px;
     margin: 0 auto;
@@ -28,9 +43,19 @@ body {
 }
 
 .session-header {
+    margin-bottom: 24px;
+}
+
+.session-title {
+    margin: 0 0 5px;
+    color: var(--text);
+    font-size: 24px;
+    font-weight: bold;
+}
+
+.session-meta {
     color: var(--subtext);
     font-size: 13px;
-    margin-bottom: 24px;
 }
 
 .item {
@@ -50,10 +75,80 @@ body {
     max-width: 100%;
 }
 
-.reasoning {
+/* A turn groups the work a message concludes — its reasoning
+   and tool runs — behind a header that summarizes it, ruled
+   off the way the app's `Turn::Work` is. */
+.turn {
+    margin-bottom: 20px;
+}
+
+.turn-header {
     background: var(--card);
     color: var(--reasoning);
     border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 10px;
+    font-size: 14px;
+    font-weight: bold;
+    cursor: pointer;
+}
+
+.turn[open] .turn-header {
+    color: var(--text);
+}
+
+/* The arrow is our own; hide the summary's native marker,
+   which `list-style` reaches in Firefox and modern Chrome,
+   and the legacy pseudo-element in WebKit. */
+summary.turn-header,
+.reasoning summary {
+    list-style: none;
+}
+
+summary.turn-header::-webkit-details-marker,
+.reasoning summary::-webkit-details-marker {
+    display: none;
+}
+
+/* The arrow follows the collapsible's own open state:
+   pointing right while it is closed, down while it is
+   open. The rule reaches only the summary the arrow sits
+   in, so an open turn does not turn its children's arrows
+   down. */
+.arrow {
+    margin-left: 10px;
+    font-weight: normal;
+}
+
+.arrow::before {
+    content: "▸";
+}
+
+.turn[open] > summary .arrow::before,
+.reasoning[open] > summary .arrow::before {
+    content: "▾";
+}
+
+/* The rule starts at the title box's bottom edge and is inset
+   from the left, the way the app's `Turn::Work` rules its
+   items off. */
+.turn-body {
+    margin-left: 10px;
+    padding: 10px 0 0 10px;
+    border-left: 2px solid var(--border);
+}
+
+.turn-body > * {
+    margin-bottom: 10px;
+}
+
+.turn-body > :last-child {
+    margin-bottom: 0;
+}
+
+.reasoning {
+    background: var(--card);
+    color: var(--reasoning);
     border-radius: 5px;
     padding: 10px;
     font-family: ui-monospace, monospace;
@@ -69,66 +164,16 @@ body {
     margin-top: 10px;
 }
 
-/* A step groups one assistant turn: its last message is shown, and
-   the reasoning and any earlier actions sit behind the header. */
-.step {
-    margin-bottom: 10px;
-}
-
-.step-header {
-    display: flex;
-    gap: 8px;
-    align-items: baseline;
-    padding: 3px 0;
-    font-family: ui-monospace, monospace;
-    font-size: 12px;
-}
-
-summary.step-header {
-    cursor: pointer;
-}
-
-.step-tools {
-    color: var(--subtext);
-}
-
-.step.failed .step-tools {
-    color: var(--danger);
-}
-
-.step-thinking-body {
-    margin-top: 6px;
-    margin-left: 7px;
-    padding-left: 12px;
-    border-left: 1px solid var(--border);
-}
-
-.step-thinking-body .item,
-.step-thinking-body .reasoning {
-    margin-bottom: 8px;
-}
-
-.step-thinking-body > :last-child {
-    margin-bottom: 0;
-}
-
+/* The 1px padding keeps the card showing through between the
+   border and the view, the way the app's box padding does. */
 .item.tool,
 .review-comment {
     background: var(--card);
     color: var(--card-text);
     border: 1px solid var(--border);
     border-radius: 5px;
+    padding: 1px;
     overflow: hidden;
-}
-
-.item.tool.success {
-    border-color: var(--success);
-}
-
-.item.tool.error,
-.item.tool.invalid,
-.item.tool.aborted {
-    border-color: var(--danger);
 }
 
 .tool-header,
@@ -139,8 +184,9 @@ summary.step-header {
     padding: 10px;
 }
 
-/* A tool is collapsed by default, like reasoning: the header is the
-   clickable summary that reveals its view and output. */
+/* A tool is collapsed by default, the way the app collapses a
+   tool's work: the header is the clickable summary that reveals
+   its view and output. */
 .tool-header {
     cursor: pointer;
 }
@@ -154,9 +200,15 @@ summary.step-header {
 
 .tool-name {
     background: var(--block);
-    color: var(--text);
-    border-radius: 5px;
+    color: #fff;
+    border-radius: 2px;
     padding: 2px 5px;
+}
+
+.item.tool.error .tool-title,
+.item.tool.invalid .tool-title,
+.item.tool.aborted .tool-title {
+    color: var(--danger);
 }
 
 pre.tool-block {
@@ -171,42 +223,43 @@ pre.tool-block {
     white-space: pre;
 }
 
-pre.tool-block + pre.tool-block {
-    border-top: 1px solid var(--border);
+/* A command is a single unit of intent, not a line of a log:
+   wrap it, keeping its newlines, and break a word that would
+   otherwise run past the edge, instead of scrolling sideways. */
+pre.tool-block.view {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }
 
+/* The view and the output are inset from the card's left,
+   right, and bottom edges. There is no top margin: the gap
+   above is the header's padding, or the view's bottom margin,
+   so a top one would double it. */
+.item.tool > pre.tool-block.view,
+.item.tool > pre.tool-block.arguments,
+.item.tool > .diff,
 pre.tool-block.output {
-    /* Cap the output at 10 lines, scrolling the rest:
-       10 × (13px × 1.5) of text, plus the 20px padding. */
+    margin: 0 10px 10px;
+}
+
+/* A tool's output, bordered by its status, the way the app
+   borders it. The export keeps the full log, so the block is
+   capped and scrolls its overflow. */
+pre.tool-block.output {
+    border: 1px solid var(--danger);
+    border-radius: 2px;
+
+    /* 10 × (13px × 1.5) of text, plus the 20px padding. */
     max-height: 16.5em;
     overflow-y: auto;
-    scrollbar-width: thin;
-    scrollbar-color: var(--border) transparent;
 }
 
-pre.tool-block.output::-webkit-scrollbar {
-    width: 8px;
-}
-
-pre.tool-block.output::-webkit-scrollbar-thumb {
-    background: var(--border);
-    border-radius: 4px;
-}
-
-.compaction {
-    color: var(--subtext);
-    font-size: 13px;
-    text-align: center;
-}
-
-.review-content {
-    padding: 10px;
+pre.tool-block.output.success {
+    border-color: var(--success-dim);
 }
 
 .diff {
     background: var(--block);
-    border-top: 1px solid var(--border);
-    border-bottom: 1px solid var(--border);
     font-family: ui-monospace, monospace;
     font-size: 13px;
     line-height: 1.5;
@@ -267,13 +320,15 @@ pre.tool-block.output::-webkit-scrollbar-thumb {
 
 .item > :first-child,
 .item .bubble > :first-child,
-.item .review-content > :first-child {
+.item .review-content > :first-child,
+.reasoning div > :first-child {
     margin-top: 0;
 }
 
 .item > :last-child,
 .item .bubble > :last-child,
-.item .review-content > :last-child {
+.item .review-content > :last-child,
+.reasoning div > :last-child {
     margin-bottom: 0;
 }
 
@@ -298,22 +353,26 @@ pre.tool-block.output::-webkit-scrollbar-thumb {
     color: var(--subtext);
 }
 
-.item code {
-    background: var(--bubble);
+.item code,
+.reasoning div code {
+    background: var(--code);
+    color: var(--code-text);
     border-radius: 4px;
     padding: 1px 4px;
     font-family: ui-monospace, monospace;
     font-size: 0.9em;
 }
 
-.item pre {
+.item pre,
+.reasoning div pre {
     background: var(--block);
     border-radius: 5px;
     padding: 10px;
     overflow-x: auto;
 }
 
-.item pre code {
+.item pre code,
+.reasoning div pre code {
     background: none;
     padding: 0;
 }
@@ -338,6 +397,12 @@ pre.tool-block.output::-webkit-scrollbar-thumb {
 .item input[type="checkbox"] {
     margin-right: 5px;
 }
+
+.compaction {
+    color: var(--subtext);
+    font-size: 13px;
+    text-align: center;
+}
 "#;
 
 /// The script of the document. Tools are collapsed by default, so a
@@ -361,9 +426,10 @@ for (const tool of document.querySelectorAll('details.item.tool')) {
 "#;
 
 /// Exports the session as a standalone HTML document, styled
-/// by `theme`.
-pub fn export(session: &Session, theme: &Theme) -> String {
-    let items = render_items(&session.items, theme);
+/// by `theme`, with the tool titles relative to `project`, and
+/// titled `title` when one is given.
+pub fn export(session: &Session, project: &Project, theme: &Theme, title: Option<&str>) -> String {
+    let items = render_items(&session.items, project, theme);
 
     let started = jiff::Timestamp::try_from(session.started_at)
         .ok()
@@ -382,23 +448,33 @@ pub fn export(session: &Session, theme: &Theme) -> String {
         format!("{count} items")
     };
 
+    // The document's title, escaped: the given one, or the
+    // default. A given title also headlines the session, above
+    // its metadata.
+    let title = title.filter(|title| !title.is_empty()).map(escape);
+    let heading = title
+        .as_ref()
+        .map(|title| format!("<h1 class=\"session-title\">{title}</h1>"))
+        .unwrap_or_default();
+
     format!(
         "<!doctype html>\n\
          <html lang=\"en\">\n\
          <head>\n\
          <meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-         <title>Pick session</title>\n\
+         <title>{title}</title>\n\
          <style>\n{style}\n</style>\n\
          </head>\n\
          <body>\n\
          <main class=\"session\">\n\
-         <header class=\"session-header\">{started} · {count} · Pick {version}</header>\n\
+         <header class=\"session-header\">{heading}<div class=\"session-meta\">{started} · {count} · Piolet {version}</div></header>\n\
          {items}\n\
          </main>\n\
          <script>{script}</script>\n\
          </body>\n\
          </html>\n",
+        title = title.unwrap_or_else(|| "Piolet session".to_owned()),
         style = style(theme),
         version = env!("CARGO_PKG_VERSION"),
         script = SCRIPT.trim(),
@@ -411,12 +487,11 @@ fn style(theme: &Theme) -> String {
     let palette = theme.palette();
     let seed = theme.seed();
 
-    // The app shades its tool and diff blocks darker than the
-    // page; do the same from the theme's background. The diff
-    // line tints are computed the way the diff view computes
-    // them: the accent, darkened, mixed into the block's
-    // background.
-    let block = seed.background.mix(Color::BLACK, 0.5);
+    // The app shades its tool and diff blocks with a fixed dark
+    // background (`tool::BACKGROUND`); do the same, and compute
+    // the diff line tints the way the diff view computes them:
+    // the accent, darkened, mixed into the block's background.
+    let block = Color::from_rgb8(0x11, 0x11, 0x11);
     let added = palette::darken(seed.success, 0.3).mix(block, 0.97);
     let deleted = palette::darken(seed.danger, 0.3).mix(block, 0.97);
 
@@ -428,6 +503,8 @@ fn style(theme: &Theme) -> String {
             --reasoning: {reasoning};
             --bubble: {bubble};
             --bubble-text: {bubble_text};
+            --code: {code};
+            --code-text: {code_text};
             --card: {card};
             --card-text: {card_text};
             --border: {border};
@@ -435,6 +512,7 @@ fn style(theme: &Theme) -> String {
             --added: {added};
             --deleted: {deleted};
             --success: {success};
+            --success-dim: {success_dim};
             --danger: {danger};
             --link: {link};
         }}
@@ -445,6 +523,11 @@ fn style(theme: &Theme) -> String {
         reasoning = hex(palette.secondary.strong.color),
         bubble = hex(palette.background.weak.color),
         bubble_text = hex(palette.background.weak.text),
+        // Inline code takes the tier one step below the
+        // bubble's, the way the app's markdown widget styles
+        // it.
+        code = hex(palette.background.weaker.color),
+        code_text = hex(palette.background.weaker.text),
         card = hex(palette.background.weakest.color),
         card_text = hex(palette.background.weakest.text),
         border = hex(palette.background.weak.color),
@@ -452,64 +535,71 @@ fn style(theme: &Theme) -> String {
         added = hex(added),
         deleted = hex(deleted),
         success = hex(seed.success),
+        // The app dims a successful tool's output border by
+        // halving its alpha.
+        success_dim = rgba(seed.success.scale_alpha(0.5)),
         danger = hex(seed.danger),
         link = hex(seed.primary),
     )
 }
 
-/// Renders the session's items. Each assistant turn — an assistant
-/// item that calls tools, followed by the tool runs it triggered —
-/// is grouped into a single collapsible step; everything else (user
-/// messages, a final answer, compactions, reviews) renders on its
-/// own.
-fn render_items(items: &[session::Item], theme: &Theme) -> String {
+/// Renders the session's items the way the app renders its
+/// `Turn`s: a user message, review, or compaction stands on its
+/// own; every other run — message-less replies and tool runs —
+/// groups into a turn, which the message that concludes it
+/// follows, if any. A turn revealing a single item inlines it
+/// instead of grouping it.
+fn render_items(items: &[session::Item], project: &Project, theme: &Theme) -> String {
     let mut html = String::new();
     let mut i = 0;
 
     while i < items.len() {
-        match &items[i] {
-            session::Item::Assistant(reply) if !reply.tool_calls.is_empty() => {
-                // A step is this turn plus any following message-less
-                // turns (assistants with tool calls but no content),
-                // merged into one. A message turn starts its own
-                // step, but the message-less turns after it fold into
-                // it.
-                let mut turns: Vec<(&session::Reply, &[session::Item])> = Vec::new();
-                let mut j = i;
-                while let session::Item::Assistant(reply_j) = &items[j] {
-                    let mut end = j + 1;
-                    while end < items.len() && matches!(&items[end], session::Item::Tool(_)) {
-                        end += 1;
-                    }
-                    turns.push((reply_j, &items[j + 1..end]));
+        let start = i;
 
-                    // Keep merging while the next item is a
-                    // message-less assistant with tool calls: it has
-                    // no message of its own, so it folds into this
-                    // step.
-                    if matches!(
-                        items.get(end),
-                        Some(session::Item::Assistant(next))
-                            if !next.tool_calls.is_empty() && next.content.is_empty()
-                    ) {
-                        j = end;
-                    } else {
-                        break;
+        loop {
+            let item = &items[i];
+            i += 1;
+
+            match item {
+                session::Item::User(_)
+                | session::Item::Review(_)
+                | session::Item::Compaction(_) => {
+                    html.push_str(&render_item(item, theme));
+                    break;
+                }
+                session::Item::Assistant(reply) if !reply.content.is_empty() => {
+                    // The message concludes the turn the run it
+                    // belongs to makes.
+                    html.push_str(&render_turn(
+                        &items[start..i],
+                        i == items.len(),
+                        project,
+                        theme,
+                    ));
+                    break;
+                }
+                _ => {
+                    match items.get(i) {
+                        None
+                        | Some(
+                            session::Item::User(_)
+                            | session::Item::Review(_)
+                            | session::Item::Compaction(_),
+                        ) => {
+                            // The run ends at a standalone item, or
+                            // with the session; the turn is in
+                            // flight when the session ends.
+                            html.push_str(&render_turn(
+                                &items[start..i],
+                                i == items.len(),
+                                project,
+                                theme,
+                            ));
+                            break;
+                        }
+                        _ => {}
                     }
                 }
-
-                // The first turn's message, if any, is shown on its own,
-                // before the step it introduces.
-                if !turns[0].0.content.is_empty() {
-                    html.push_str(&render_message(&turns[0].0.content, theme));
-                }
-
-                html.push_str(&render_step(&turns, theme));
-                i = j + 1 + turns.last().unwrap().1.len();
-            }
-            item => {
-                html.push_str(&render_item(item, theme));
-                i += 1;
             }
         }
     }
@@ -517,146 +607,206 @@ fn render_items(items: &[session::Item], theme: &Theme) -> String {
     html
 }
 
-/// The content message of a turn, shown on its own as an assistant
-/// message, before the step it introduces. Its reasoning (if any)
-/// belongs to the step, so it is not shown here.
-fn render_message(content: &str, theme: &Theme) -> String {
-    format!(
-        "<div class=\"item assistant\">{}</div>",
-        markdown(content, theme)
-    )
-}
+/// Renders a run of message-less replies and tool runs as a
+/// turn, the way the app renders a `Turn::Work`: a bordered
+/// header summarizes the work, the work itself sits behind it,
+/// and the message that concludes it, if any, follows on its
+/// own. A turn of a single item inlines the item instead, as
+/// its own header already carries the work. The turn that ends
+/// a session with no concluding message starts open, as the app
+/// forces its in-flight turn open.
+fn render_turn(
+    turn: &[session::Item],
+    ends_session: bool,
+    project: &Project,
+    theme: &Theme,
+) -> String {
+    // The message that concludes the turn, if any.
+    let reply = match turn.last() {
+        Some(session::Item::Assistant(reply)) if !reply.content.is_empty() => Some(reply),
+        _ => None,
+    };
 
-/// Renders one or more merged assistant turns as a step: the header
-/// shows a summary of the tools the turns called, and the turns'
-/// reasoning and tool runs sit behind it. A turn's message, if any, is
-/// shown on its own, before the step, not here. The step is marked
-/// when one of its tools failed.
-fn render_step(turns: &[(&session::Reply, &[session::Item])], theme: &Theme) -> String {
-    // Every tool name across all the turns, in call order.
-    let names = turns
-        .iter()
-        .flat_map(|(_, tools)| tools.iter())
-        .filter_map(|item| {
-            if let session::Item::Tool(run) = item {
-                Some(run.call.name.as_str())
-            } else {
-                None
+    let open = ends_session && reply.is_none();
+
+    // Every reply's reasoning and tool run, revealed by the
+    // header.
+    let mut body = String::new();
+    let mut items = 0;
+
+    for item in turn {
+        match item {
+            session::Item::Assistant(reply) => {
+                if let Some(reasoning) = render_reasoning(reply, theme) {
+                    body.push_str(&reasoning);
+                    items += 1;
+                }
             }
-        })
-        .collect::<Vec<_>>();
-
-    // The step is marked when any of its tools failed.
-    let failed = turns.iter().any(|(_, tools)| {
-        tools.iter().any(|item| match item {
-            session::Item::Tool(run) => matches!(
-                run.status,
-                session::Status::Error { .. } | session::Status::Invalid
-            ),
-            _ => false,
-        })
-    });
-
-    // Each turn's reasoning and tool runs, revealed by the header.
-    let mut thinking = String::new();
-    for &(reply, tools) in turns {
-        thinking.push_str(&render_reasoning(reply, theme).unwrap_or_default());
-        for item in tools {
-            thinking.push_str(&render_item(item, theme));
+            session::Item::Tool(run) => {
+                body.push_str(&render_tool(run, project, theme));
+                items += 1;
+            }
+            _ => {}
         }
     }
 
-    // The header summarizes the tools; the exact list is kept as a
-    // tooltip.
-    let header = format!(
-        "<span class=\"step-tools\" title=\"{raw}\">{summary}</span>",
-        raw = escape(&names.join(", ")).replace('"', "&quot;"),
-        summary = summarize_tools(&names)
-    );
-
-    // Revealed by the header when there is any; otherwise the header
-    // is a plain label.
-    let head = if thinking.is_empty() {
-        format!("<div class=\"step-header\">{header}</div>")
+    // A turn of a single item needs no group of its own: the
+    // item stands in its place.
+    let mut html = if items == 1 {
+        body
     } else {
         format!(
-            "<details class=\"step-thinking\"><summary class=\"step-header\">{header}</summary><div class=\"step-thinking-body\">{thinking}</div></details>"
+            "<details class=\"turn\"{open}><summary class=\"turn-header\"><span class=\"turn-summary\">{}</span><span class=\"arrow\"></span></summary><div class=\"turn-body\">{}</div></details>",
+            escape(&summary_of(turn, project)),
+            body,
+            open = if open { " open" } else { "" },
         )
     };
 
-    format!(
-        "<div class=\"step{failed}\">{head}</div>",
-        failed = if failed { " failed" } else { "" }
-    )
+    if let Some(reply) = reply {
+        html.push_str(&format!(
+            "<div class=\"item assistant\">{}</div>",
+            markdown(&reply.content, theme)
+        ));
+    }
+
+    html
 }
 
-/// A human-readable summary of the tools called in a step, e.g.
-/// "Ran 3 commands, edited 4 files", counting each tool in order of
-/// its first call.
-fn summarize_tools(names: &[&str]) -> String {
-    // The counts, in order of first call.
-    let mut counts: Vec<(&str, usize)> = Vec::new();
-    for name in names {
-        match counts.iter_mut().find(|(found, _)| *found == *name) {
-            Some((_, count)) => *count += 1,
-            None => counts.push((name, 1)),
+/// The summary of a turn's work, the way the app summarizes a
+/// `Turn::Work`: the single command's title, or the counts of
+/// the commands, reads, edits, and writes the turn ran, and how
+/// long its replies took to think.
+fn summary_of(turn: &[session::Item], project: &Project) -> String {
+    let mut reasoning = time::Duration::ZERO;
+    let mut command = String::new();
+    let mut commands = 0;
+    let mut reads = 0;
+    let mut edits = 0;
+    let mut writes = 0;
+
+    for item in turn {
+        match item {
+            session::Item::Assistant(reply) => {
+                if let Some(timings) = reply.timings {
+                    reasoning += timings.reasoning;
+                }
+            }
+            session::Item::Tool(run) => match run.call.name.as_str() {
+                "bash" => {
+                    if command.is_empty() {
+                        command = title_of(run, project).unwrap_or_default();
+                    }
+
+                    commands += 1
+                }
+                "read" => reads += 1,
+                "edit" => edits += 1,
+                "write" => writes += 1,
+                _ => {}
+            },
+            _ => {}
         }
     }
 
-    counts
-        .iter()
-        .enumerate()
-        .map(|(i, (name, count))| {
-            let phrase = match *name {
-                "bash" => format!("ran {} command{}", count, plural(*count)),
-                "read" => format!("read {} file{}", count, plural(*count)),
-                "write" => format!("wrote {} file{}", count, plural(*count)),
-                "edit" => format!("edited {} file{}", count, plural(*count)),
-                other => format!("called {} {} time{}", other, count, plural(*count)),
-            };
-            // The first phrase starts the sentence.
-            if i == 0 {
-                let mut chars = phrase.chars();
-                match chars.next() {
-                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-                    None => phrase,
-                }
+    let inflect = |word: &str, count: usize| {
+        if count == 1 {
+            word.to_owned()
+        } else {
+            format!("{word}s")
+        }
+    };
+
+    let mut summary = [
+        (commands > 0).then(|| {
+            if commands == 1 && !command.is_empty() {
+                command
             } else {
-                phrase
+                format!("ran {commands} {}", inflect("command", commands))
             }
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
+        }),
+        (reads > 0).then(|| format!("read {reads} {}", inflect("file", reads))),
+        (edits > 0).then(|| format!("edited {edits} {}", inflect("file", edits))),
+        (writes > 0).then(|| format!("wrote {writes} {}", inflect("file", writes))),
+        (reasoning > time::Duration::ZERO)
+            .then(|| format!("thought for {}", item::duration(reasoning))),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(", ");
+
+    if summary.is_empty() {
+        summary = "Catching up...".to_owned();
+    }
+
+    capitalize(&summary)
 }
 
-/// The plural suffix for a count: nothing for one, "s" otherwise.
-fn plural(count: usize) -> &'static str {
-    if count == 1 { "" } else { "s" }
+/// Capitalizes the first character of `text`, the way the app
+/// capitalizes a turn's summary.
+fn capitalize(text: &str) -> String {
+    let mut chars = text.chars();
+
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
-/// The reasoning of a reply as a collapsible block, if it has any.
+/// The reasoning of a reply as a collapsed block, if it has any:
+/// the header carries its duration, the way the app's compact
+/// reasoning does.
 fn render_reasoning(reply: &session::Reply, theme: &Theme) -> Option<String> {
     if reply.reasoning.is_empty() {
         return None;
     }
 
+    let is_done = !reply.content.is_empty() || !reply.tool_calls.is_empty();
+
     let summary = match reply.timings {
-        Some(timings) => format!("Thought for {}", item::duration(timings.reasoning)),
-        None => "Thought".to_owned(),
+        Some(timings) => {
+            if is_done {
+                format!("Thought for {}", item::duration(timings.reasoning))
+            } else {
+                format!("Thinking... ({})", item::duration(timings.reasoning))
+            }
+        }
+        None => {
+            if is_done {
+                "Thought".to_owned()
+            } else {
+                "Thinking...".to_owned()
+            }
+        }
     };
 
     Some(format!(
-        "<details class=\"reasoning\"><summary>{summary}</summary><div>{}</div></details>",
+        // The `item` class gives the box its margin, which it
+        // needs once a turn inlines it.
+        "<details class=\"item reasoning\"><summary><span>{summary}</span><span class=\"arrow\"></span></summary><div>{}</div></details>",
         markdown(&reply.reasoning, theme)
     ))
 }
 
-/// Renders one tool run as a collapsible block: the badge and title
-/// are the summary, the view and output are the body. When `open` is
-/// set the block starts expanded, so its content is shown.
-/// Renders one tool run as a collapsible block: the badge and title
-/// are the summary, the view and output are the body.
-fn render_tool(run: &session::ToolRun, theme: &Theme) -> String {
+/// The title of a tool run, the way the app titles it: the
+/// tool's parsed state titles it — a bash's `description`, a
+/// read, write, or edit's project-relative path.
+fn title_of(run: &session::ToolRun, project: &Project) -> Option<String> {
+    let tools = tool::Tool::builtins();
+    let state = tools
+        .get(run.call.name.as_str())?
+        .parse(&run.call.arguments)
+        .ok()?;
+
+    state.title(project).map(|title| title.to_string())
+}
+
+/// Renders one tool run as a collapsed block, the way the app
+/// renders a tool: the badge and title are the summary, and the
+/// view and the output — bordered by its status — sit behind
+/// it.
+fn render_tool(run: &session::ToolRun, project: &Project, theme: &Theme) -> String {
     let status = match &run.status {
         session::Status::Success { .. } => "success",
         session::Status::Error { .. } => "error",
@@ -664,38 +814,54 @@ fn render_tool(run: &session::ToolRun, theme: &Theme) -> String {
         session::Status::Aborted => "aborted",
     };
 
-    let title = title_of(&run.call)
+    let title = title_of(run, project)
         .map(|title| format!("<span class=\"tool-title\">{}</span>", escape(&title)))
         .unwrap_or_default();
 
     let view = view_of(&run.call, theme);
 
     let output = match &run.status {
-        session::Status::Success { output } => {
-            let output = output.to_string();
-
-            (!output.trim().is_empty())
-                .then(|| format!("<pre class=\"tool-block output\">{}</pre>", escape(&output)))
+        session::Status::Success { output } if output.lines() > 0 => {
+            // The export keeps the full log; the block is capped
+            // and scrolls its overflow.
+            format!(
+                "<pre class=\"tool-block output success\">{}</pre>",
+                output.all().map(escape).collect::<Vec<_>>().join("\n")
+            )
         }
-        session::Status::Error { output } => Some(format!(
-            "<pre class=\"tool-block output\">{}</pre>",
-            escape(output)
-        )),
-        session::Status::Invalid => {
-            Some("<pre class=\"tool-block output\">[invalid tool call]</pre>".to_owned())
-        }
-        session::Status::Aborted => {
-            Some("<pre class=\"tool-block output\">[execution aborted]</pre>".to_owned())
-        }
+        // An empty output renders nothing, the way the app
+        // renders it.
+        session::Status::Success { .. } => String::new(),
+        session::Status::Error { output } => status_output("error", output),
+        session::Status::Invalid => status_output("invalid", "[invalid tool call]"),
+        session::Status::Aborted => status_output("aborted", "[execution aborted]"),
     };
 
     format!(
         "<details class=\"item tool {status}\"><summary class=\"tool-header\"><span class=\"tool-name\">{name}</span>{title}</summary>{view}{output}</details>",
-        name = escape(&run.call.name),
-        output = output.unwrap_or_default()
+        name = escape(&run.call.name)
     )
 }
 
+/// The output of a failed run: its message, trimmed, or a
+/// placeholder when it has none, in a block bordered by its
+/// status.
+fn status_output(status: &str, content: &str) -> String {
+    let text = if content.trim().is_empty() {
+        "[No output]".to_owned()
+    } else {
+        content.trim().to_owned()
+    };
+
+    format!(
+        "<pre class=\"tool-block output {status}\">{}</pre>",
+        escape(&text)
+    )
+}
+
+/// Renders an item that stands on its own — a user message, a
+/// review, or a compaction. Assistant and tool runs group into
+/// turns and never stand alone.
 fn render_item(item: &session::Item, theme: &Theme) -> String {
     match item {
         session::Item::User(content) => {
@@ -704,19 +870,6 @@ fn render_item(item: &session::Item, theme: &Theme) -> String {
                 markdown(content, theme)
             )
         }
-        session::Item::Assistant(reply) => {
-            let content = if reply.content.is_empty() {
-                String::new()
-            } else {
-                markdown(&reply.content, theme)
-            };
-
-            format!(
-                "<div class=\"item assistant\">{reasoning}{content}</div>",
-                reasoning = render_reasoning(reply, theme).unwrap_or_default()
-            )
-        }
-        session::Item::Tool(run) => render_tool(run, theme),
         session::Item::Compaction(compaction) => format!(
             "<div class=\"item compaction\">Compacted into {} tokens</div>",
             locale::thousands(compaction.tokens)
@@ -743,36 +896,19 @@ fn render_item(item: &session::Item, theme: &Theme) -> String {
 
             format!("<div class=\"item review\">{message}{comments}</div>")
         }
+        session::Item::Assistant(_) | session::Item::Tool(_) => {
+            // Assistant and tool runs group into turns; they are
+            // rendered by `render_turn`, never on their own.
+            String::new()
+        }
     }
 }
 
-/// The title of a tool call, when its arguments carry one: a
-/// `title`, or a `path`, or the first line of a `command`.
-fn title_of(call: &reason::tool::Call) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(&call.arguments).ok()?;
-
-    let title = value
-        .get("title")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|title| !title.is_empty());
-
-    title
-        .or_else(|| value.get("path").and_then(|value| value.as_str()))
-        .or_else(|| {
-            value
-                .get("command")
-                .and_then(|value| value.as_str())
-                .and_then(|command| command.lines().next())
-        })
-        .map(str::to_owned)
-}
-
 /// The view of a tool call's arguments, mirroring the app's
-/// `Call::view`: the command of a `bash`, the content of a `write`,
-/// the diff of an `edit` — and nothing for a `read`, whose title
-/// carries its path. A call that cannot be parsed, or a tool without
-/// a view, falls back to its raw arguments.
+/// `Call::view`: the command of a `bash`, the content of a
+/// `write`, the diff of an `edit` — and nothing for a `read`,
+/// whose title carries its path. A call that cannot be parsed,
+/// or a tool without a view, falls back to its raw arguments.
 fn view_of(call: &reason::tool::Call, theme: &Theme) -> String {
     let value = match serde_json::from_str::<serde_json::Value>(&call.arguments) {
         Ok(value) => value,
@@ -895,7 +1031,7 @@ fn span_html(span: &iced::widget::text::Span<'static>) -> String {
 }
 
 /// The raw arguments of a call, pretty-printed and highlighted: the
-/// fallback for a tool without a dedicated view.
+/// fallback for a tool without a view.
 fn arguments_block(arguments: &str, theme: &Theme) -> String {
     format!(
         "<pre class=\"tool-block arguments\"><code>{}</code></pre>",
@@ -1169,6 +1305,13 @@ fn hex(color: Color) -> String {
     format!("#{r:02x}{g:02x}{b:02x}")
 }
 
+/// The CSS color of an iced color, keeping its alpha.
+fn rgba(color: Color) -> String {
+    let [r, g, b, a] = color.into_rgba8();
+
+    format!("#{r:02x}{g:02x}{b:02x}{a:02x}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1183,8 +1326,62 @@ mod tests {
                 started_at: SystemTime::UNIX_EPOCH,
                 items,
             },
+            &Project::current_dir().expect("a project exists"),
             &Theme::CatppuccinMocha,
+            None,
         )
+    }
+
+    fn export_titled(items: Vec<session::Item>, title: &str) -> String {
+        super::export(
+            &Session {
+                version: session::Version::current(),
+                started_at: SystemTime::UNIX_EPOCH,
+                items,
+            },
+            &Project::current_dir().expect("a project exists"),
+            &Theme::CatppuccinMocha,
+            Some(title),
+        )
+    }
+
+    fn assistant(
+        reasoning: &str,
+        content: &str,
+        calls: Vec<reason::tool::Call>,
+        timings: Option<reason::Timings>,
+    ) -> session::Item {
+        session::Item::Assistant(session::Reply {
+            prompt: Default::default(),
+            reasoning: reasoning.to_owned(),
+            content: content.to_owned(),
+            tool_calls: calls,
+            timings,
+        })
+    }
+
+    fn call(id: &str, name: &str, arguments: &str) -> reason::tool::Call {
+        reason::tool::Call {
+            id: id.to_owned().into(),
+            name: name.to_owned(),
+            arguments: arguments.to_owned(),
+        }
+    }
+
+    fn tool(id: &str, name: &str, arguments: &str) -> session::Item {
+        session::Item::Tool(session::ToolRun {
+            call: call(id, name, arguments),
+            status: session::Status::Success {
+                output: Output::new(),
+            },
+        })
+    }
+
+    fn timings(duration: Duration) -> Option<reason::Timings> {
+        Some(reason::Timings {
+            reasoning: duration,
+            ..Default::default()
+        })
     }
 
     #[test]
@@ -1192,8 +1389,28 @@ mod tests {
         let document = export(vec![]);
 
         assert!(document.starts_with("<!doctype html>"));
-        assert!(document.contains("<title>Pick session</title>"));
-        assert!(document.contains("0 items · Pick "));
+        assert!(document.contains("<title>Piolet session</title>"));
+        assert!(document.contains("0 items · Piolet "));
+        assert!(!document.contains("<h1 class=\"session-title\">"));
+    }
+
+    #[test]
+    fn a_title_headlines_the_export() {
+        let document = export_titled(vec![], "Rebasing onto master");
+
+        // The title becomes the document's title and headlines
+        // the session, above its metadata.
+        assert!(document.contains("<title>Rebasing onto master</title>"));
+        let heading = document
+            .find("<h1 class=\"session-title\">Rebasing onto master</h1>")
+            .unwrap();
+        let meta = document.find("<div class=\"session-meta\">").unwrap();
+        assert!(heading < meta);
+
+        // Like any other content, a title is escaped.
+        let document = export_titled(vec![], "a < b & c");
+        assert!(document.contains("<title>a &lt; b &amp; c</title>"));
+        assert!(document.contains("<h1 class=\"session-title\">a &lt; b &amp; c</h1>"));
     }
 
     #[test]
@@ -1205,6 +1422,49 @@ mod tests {
         assert!(document.contains("--success: #a6e3a1"));
         assert!(document.contains("--danger: #f38ba8"));
         assert!(document.contains("--link: #89b4fa"));
+
+        // The tool and diff blocks use the app's fixed dark
+        // background.
+        assert!(document.contains("--block: #111111"));
+
+        // Inline code takes the `weaker` background tier, one
+        // step darker than the bubble's `weak` tier — not the
+        // bubble's own color.
+        let tier = |name: &str| -> String {
+            let i = document.find(name).expect("variable");
+            document[i + name.len() + 2..i + name.len() + 9].to_owned()
+        };
+        assert_ne!(tier("--code"), tier("--bubble"));
+
+        // The collapsibles' summaries hide their native
+        // markers, so only our arrow shows, which follows the
+        // open state.
+        assert!(
+            document
+                .contains("summary.turn-header,\n.reasoning summary {\n    list-style: none;\n}")
+        );
+        assert!(document.contains(
+            "summary.turn-header::-webkit-details-marker,\n.reasoning summary::-webkit-details-marker"
+        ));
+        assert!(document.contains("content: \"▸\""));
+        assert!(document.contains(
+            ".turn[open] > summary .arrow::before,\n.reasoning[open] > summary .arrow::before {\n    content: \"▾\";\n}"
+        ));
+
+        // The command wraps instead of scrolling sideways.
+        assert!(document.contains(
+            "pre.tool-block.view {\n    white-space: pre-wrap;\n    overflow-wrap: anywhere;\n}"
+        ));
+
+        // The reasoning's markdown keeps its margins inside its
+        // blocks, not against the box's padding.
+        assert!(document.contains(".reasoning div > :first-child"));
+        assert!(document.contains(".reasoning div > :last-child"));
+
+        // Every scrollbar is styled the same, wherever it
+        // scrolls, keeping its default size.
+        assert!(document.contains("scrollbar-color: var(--border) transparent"));
+        assert!(document.contains("::-webkit-scrollbar-thumb"));
     }
 
     #[test]
@@ -1222,13 +1482,12 @@ mod tests {
     fn text_that_looks_like_html_is_rendered_literally() {
         // Rust generics in prose would otherwise be passed through as
         // raw HTML tags.
-        let document = export(vec![session::Item::Assistant(session::Reply {
-            prompt: Default::default(),
-            reasoning: String::new(),
-            content: "items are (Range<usize>, Code) and Box<dyn Iterator>".to_owned(),
-            tool_calls: vec![],
-            timings: None,
-        })]);
+        let document = export(vec![assistant(
+            "",
+            "items are (Range<usize>, Code) and Box<dyn Iterator>",
+            vec![],
+            None,
+        )]);
 
         assert!(document.contains("Range&lt;usize&gt;"));
         assert!(document.contains("Box&lt;dyn Iterator&gt;"));
@@ -1251,124 +1510,112 @@ mod tests {
     }
 
     #[test]
-    fn assistant_reasoning_is_collapsed_with_its_duration() {
-        let document = export(vec![session::Item::Assistant(session::Reply {
-            prompt: Default::default(),
-            reasoning: "thinking".to_owned(),
-            content: "it is **done**".to_owned(),
-            tool_calls: vec![],
-            timings: Some(reason::Timings {
-                reasoning: Duration::from_millis(50),
-                ..Default::default()
-            }),
-        })]);
+    fn a_message_follows_the_turn_that_concludes_it() {
+        let document = export(vec![assistant(
+            "thinking",
+            "it is **done**",
+            vec![],
+            timings(Duration::from_millis(50)),
+        )]);
 
-        assert!(document.contains("<div class=\"item assistant\">"));
+        // A message alone is a turn with no work of its own:
+        // its single reasoning is inlined in place of the
+        // group, and the message follows it.
+        assert!(!document.contains("<details class=\"turn"));
         assert!(
             document
-                .contains("<details class=\"reasoning\"><summary>Thought for 50ms</summary><div>")
+                .contains(
+                    "<details class=\"item reasoning\"><summary><span>Thought for 50ms</span><span class=\"arrow\"></span></summary><div>",
+                )
         );
-        assert!(document.contains("<strong>done</strong>"));
+
+        let reasoning = document.find("<details class=\"item reasoning").unwrap();
+        let message = document
+            .find("<div class=\"item assistant\"><p>it is <strong>done</strong></p>")
+            .unwrap();
+        assert!(reasoning < message);
+
+        // The reasoning carries the thinking, not the message.
+        let reasoning_html = &document[reasoning..message];
+        assert!(reasoning_html.contains("thinking"));
+        assert!(!reasoning_html.contains("it is <strong>done</strong>"));
     }
 
     #[test]
-    fn a_turn_groups_its_reasoning_and_tools_into_a_step() {
-        let call = reason::tool::Call {
-            id: "call_1".to_owned().into(),
-            name: "bash".to_owned(),
-            arguments: r#"{"command":"git status","title":"Check the status"}"#.to_owned(),
-        };
+    fn a_turn_groups_the_work_that_its_message_concludes() {
+        let call = call(
+            "call_1",
+            "bash",
+            r#"{"command":"git status","description":"Check the status"}"#,
+        );
 
         let document = export(vec![
-            session::Item::Assistant(session::Reply {
-                prompt: Default::default(),
-                reasoning: "let me check the status".to_owned(),
-                content: String::new(),
-                tool_calls: vec![call.clone()],
-                timings: Some(reason::Timings {
-                    reasoning: Duration::from_millis(50),
-                    ..Default::default()
-                }),
-            }),
+            // A message-less turn: reasoning, a tool call.
+            assistant(
+                "let me check the status",
+                "",
+                vec![call.clone()],
+                timings(Duration::from_millis(50)),
+            ),
             session::Item::Tool(session::ToolRun {
                 call,
                 status: session::Status::Success {
                     output: Output::new(),
                 },
             }),
-            // The final answer is rendered on its own.
-            session::Item::Assistant(session::Reply {
-                prompt: Default::default(),
-                reasoning: String::new(),
-                content: "All good.".to_owned(),
-                tool_calls: vec![],
-                timings: None,
-            }),
+            // The message that concludes the turn.
+            assistant("", "All good.", vec![], None),
         ]);
 
-        // The turn is a step, numbered and labelled with the tool it
-        // called; its reasoning and tool run sit behind the header.
-        assert!(document.contains("<div class=\"step\">"));
+        // One turn, summarized by the command's title and the
+        // reasoning's duration; its work sits behind the header.
+        assert_eq!(document.matches("<details class=\"turn").count(), 1);
         assert!(
-            document.contains("<span class=\"step-tools\" title=\"bash\">Ran 1 command</span>")
+            document
+                .contains("<span class=\"turn-summary\">Check the status, thought for 50ms</span>")
         );
 
-        // The tool run and reasoning are behind the header, inside the
-        // step, which carries no message of its own.
-        let step = &document[document.find("<div class=\"step\">").unwrap()
-            ..document.find("<div class=\"item assistant\">").unwrap()];
-        assert!(step.contains("item tool success"));
-        assert!(!step.contains(" open"));
-        assert!(step.contains("step-thinking"));
-        assert!(step.contains("let me check the status"));
-        assert!(step.contains("Thought for 50ms"));
-        assert!(!step.contains("step-content"));
+        let turn = document.find("<details class=\"turn").unwrap();
+        let message = document
+            .find("<div class=\"item assistant\"><p>All good.</p>")
+            .unwrap();
+        assert!(turn < message);
 
-        // The final answer is a plain assistant, rendered on its own.
-        assert!(document.contains("<div class=\"item assistant\"><p>All good.</p>"));
+        let turn_html = &document[turn..message];
+
+        // The tool run and the reasoning are behind the header;
+        // the message is not.
+        assert!(turn_html.contains("item tool success"));
+        assert!(turn_html.contains("let me check the status"));
+        assert!(turn_html.contains("Thought for 50ms"));
+        assert!(!turn_html.contains("All good."));
+        assert!(!turn_html.contains(" open"));
     }
 
     #[test]
-    fn consecutive_messageless_turns_are_merged_into_one_step() {
-        let bash1 = reason::tool::Call {
-            id: "c1".to_owned().into(),
-            name: "bash".to_owned(),
-            arguments: r#"{"command":"make"}"#.to_owned(),
-        };
-        let read1 = reason::tool::Call {
-            id: "c2".to_owned().into(),
-            name: "read".to_owned(),
-            arguments: r#"{"path":"a.rs"}"#.to_owned(),
-        };
-        let bash2 = reason::tool::Call {
-            id: "c3".to_owned().into(),
-            name: "bash".to_owned(),
-            arguments: r#"{"command":"test"}"#.to_owned(),
-        };
+    fn consecutive_messageless_turns_are_merged_into_one_open_turn() {
+        let bash1 = call("c1", "bash", r#"{"command":"make"}"#);
+        let read1 = call("c2", "read", r#"{"path":"a.rs"}"#);
+        let bash2 = call("c3", "bash", r#"{"command":"test"}"#);
 
         let document = export(vec![
             // Turn 1: reasoning + one bash call, no message.
-            session::Item::Assistant(session::Reply {
-                prompt: Default::default(),
-                reasoning: "build it".to_owned(),
-                content: String::new(),
-                tool_calls: vec![bash1.clone()],
-                timings: None,
-            }),
+            assistant("build it", "", vec![bash1.clone()], None),
             session::Item::Tool(session::ToolRun {
                 call: bash1,
                 status: session::Status::Success {
                     output: Output::new(),
                 },
             }),
-            // Turn 2: reasoning + a read and a bash call, no message.
-            session::Item::Assistant(session::Reply {
-                prompt: Default::default(),
-                reasoning: "inspect the result".to_owned(),
-                content: String::new(),
-                tool_calls: vec![read1.clone(), bash2.clone()],
-                timings: None,
-            }),
+            // Turn 2: reasoning + a read and a bash call, no
+            // message; the run ends the session, so the turn is
+            // in flight and starts open.
+            assistant(
+                "inspect the result",
+                "",
+                vec![read1.clone(), bash2.clone()],
+                None,
+            ),
             session::Item::Tool(session::ToolRun {
                 call: read1,
                 status: session::Status::Success {
@@ -1383,57 +1630,44 @@ mod tests {
             }),
         ]);
 
-        // The two message-less turns are merged into a single step.
-        assert_eq!(document.matches("class=\"step-header\"").count(), 1);
-        // The header summarizes every tool across the turns, with the
-        // exact list in the tooltip.
-        assert!(document.contains(
-            "<span class=\"step-tools\" title=\"bash, read, bash\">Ran 2 commands, read 1 file</span>"
-        ));
+        // The message-less run is a single turn, open, summarizing
+        // every tool across the turns.
+        assert_eq!(document.matches("<details class=\"turn").count(), 1);
+        assert!(document.contains("<details class=\"turn\" open>"));
+        assert!(
+            document.contains("<span class=\"turn-summary\">Ran 2 commands, read 1 file</span>")
+        );
 
-        // Both turns' reasoning and all three tool runs sit behind the
-        // single header.
+        // Both turns' reasoning and all three tool runs sit behind
+        // the single header.
         assert!(document.contains("build it"));
         assert!(document.contains("inspect the result"));
         assert_eq!(document.matches("item tool success").count(), 3);
     }
 
     #[test]
-    fn a_message_turn_breaks_the_merge() {
-        let bash1 = reason::tool::Call {
-            id: "c1".to_owned().into(),
-            name: "bash".to_owned(),
-            arguments: r#"{"command":"make"}"#.to_owned(),
-        };
-        let read1 = reason::tool::Call {
-            id: "c2".to_owned().into(),
-            name: "read".to_owned(),
-            arguments: r#"{"path":"a.rs"}"#.to_owned(),
-        };
+    fn a_message_concludes_the_turn_that_precedes_it() {
+        let bash1 = call("c1", "bash", r#"{"command":"make"}"#);
+        let read1 = call("c2", "read", r#"{"path":"a.rs"}"#);
 
         let document = export(vec![
-            // Turn 1: a message-less action turn.
-            session::Item::Assistant(session::Reply {
-                prompt: Default::default(),
-                reasoning: String::new(),
-                content: String::new(),
-                tool_calls: vec![bash1.clone()],
-                timings: None,
-            }),
+            // A message turn: it concludes the (empty) work that
+            // precedes it.
+            assistant(
+                "",
+                "Build it, then look at the result.",
+                vec![bash1.clone()],
+                None,
+            ),
+            // The message's own call belongs to the run that
+            // follows it, which is in flight: open.
             session::Item::Tool(session::ToolRun {
                 call: bash1,
                 status: session::Status::Success {
                     output: Output::new(),
                 },
             }),
-            // Turn 2: a message turn; it stands on its own.
-            session::Item::Assistant(session::Reply {
-                prompt: Default::default(),
-                reasoning: String::new(),
-                content: "Now I will read it.".to_owned(),
-                tool_calls: vec![read1.clone()],
-                timings: None,
-            }),
+            assistant("", "", vec![read1.clone()], None),
             session::Item::Tool(session::ToolRun {
                 call: read1,
                 status: session::Status::Success {
@@ -1442,341 +1676,135 @@ mod tests {
             }),
         ]);
 
-        // The message turn is not merged into the action turn: there
-        // are two steps.
-        assert_eq!(document.matches("class=\"step-header\"").count(), 2);
+        assert_eq!(document.matches("<details class=\"turn").count(), 2);
 
-        // The message turn's message is shown on its own, before its
-        // step; each step keeps its own tools.
-        let message = document
-            .find("<div class=\"item assistant\"><p>Now I will read it.</p>")
-            .unwrap();
-        let step2 = document.rfind("class=\"step-header\"").unwrap();
-        assert!(message < step2);
-        assert!(
-            document.contains("<span class=\"step-tools\" title=\"bash\">Ran 1 command</span>")
-        );
-        assert!(document.contains("<span class=\"step-tools\" title=\"read\">Read 1 file</span>"));
-    }
+        let turn1 = document.find("<details class=\"turn").unwrap();
+        let turn2 = document.rfind("<details class=\"turn").unwrap();
 
-    #[test]
-    fn a_messageless_turn_folds_into_the_preceding_step() {
-        // A message-less turn after a message turn folds into the
-        // message turn's step, so no message-less step stands alone
-        // right after it.
-        let bash1 = reason::tool::Call {
-            id: "c1".to_owned().into(),
-            name: "bash".to_owned(),
-            arguments: r#"{"command":"make"}"#.to_owned(),
-        };
-        let read1 = reason::tool::Call {
-            id: "c2".to_owned().into(),
-            name: "read".to_owned(),
-            arguments: r#"{"path":"a.rs"}"#.to_owned(),
-        };
-
-        let document = export(vec![
-            // Turn 1: a message turn.
-            session::Item::Assistant(session::Reply {
-                prompt: Default::default(),
-                reasoning: String::new(),
-                content: "Build it, then look at the result.".to_owned(),
-                tool_calls: vec![bash1.clone()],
-                timings: None,
-            }),
-            session::Item::Tool(session::ToolRun {
-                call: bash1,
-                status: session::Status::Success {
-                    output: Output::new(),
-                },
-            }),
-            // Turn 2: a message-less turn; it folds into the step
-            // above.
-            session::Item::Assistant(session::Reply {
-                prompt: Default::default(),
-                reasoning: String::new(),
-                content: String::new(),
-                tool_calls: vec![read1.clone()],
-                timings: None,
-            }),
-            session::Item::Tool(session::ToolRun {
-                call: read1,
-                status: session::Status::Success {
-                    output: Output::new(),
-                },
-            }),
-        ]);
-
-        // One step, with the message turn's message on its own,
-        // before it.
-        assert_eq!(document.matches("class=\"step-header\"").count(), 1);
+        // The first turn has no work of its own: a "Catching up..."
+        // header, and the message below it.
+        assert!(document[turn1..turn2].contains("Catching up..."));
         let message = document
             .find("<div class=\"item assistant\"><p>Build it, then look at the result.</p>")
             .unwrap();
-        let step = document.find("class=\"step-header\"").unwrap();
-        assert!(message < step);
+        assert!(turn1 < message && message < turn2);
 
-        // The step carries both turns' tools and runs.
-        assert!(document.contains(
-            "<span class=\"step-tools\" title=\"bash, read\">Ran 1 command, read 1 file</span>"
-        ));
-        let step_html = &document[step..document.find("</main>").unwrap()];
-        assert_eq!(step_html.matches("item tool success").count(), 2);
+        // The second turn is in flight: open, summarizing both tool
+        // runs, carrying them behind its header.
+        let tail = &document[turn2..];
+        assert!(tail.contains("<details class=\"turn\" open>"));
+        assert!(tail.contains("<span class=\"turn-summary\">Ran 1 command, read 1 file</span>"));
+        assert_eq!(tail.matches("item tool success").count(), 2);
     }
 
     #[test]
-    fn the_step_header_summarizes_its_tools() {
-        let call = |id: &str, name: &str| reason::tool::Call {
-            id: id.to_owned().into(),
-            name: name.to_owned(),
-            arguments: r#"{"command":"true"}"#.to_owned(),
-        };
-        let run = |id: &str, name: &str| {
-            session::Item::Tool(session::ToolRun {
-                call: call(id, name),
-                status: session::Status::Success {
-                    output: Output::new(),
-                },
-            })
-        };
-
-        // bash, bash, edit, bash, edit.
+    fn a_lone_run_stands_in_for_its_turn() {
+        // One command, no reasoning: the turn inlines its
+        // single run, whose header carries the command's title.
         let document = export(vec![
-            session::Item::Assistant(session::Reply {
-                prompt: Default::default(),
-                reasoning: String::new(),
-                content: String::new(),
-                tool_calls: vec![
-                    call("c1", "bash"),
-                    call("c2", "bash"),
-                    call("c3", "edit"),
-                    call("c4", "bash"),
-                    call("c5", "edit"),
+            assistant(
+                "",
+                "",
+                vec![call(
+                    "c1",
+                    "bash",
+                    r#"{"command":"git status","description":"Check the status"}"#,
+                )],
+                None,
+            ),
+            tool(
+                "c1",
+                "bash",
+                r#"{"command":"git status","description":"Check the status"}"#,
+            ),
+        ]);
+
+        assert!(!document.contains("<details class=\"turn"));
+        assert!(document.contains("<span class=\"tool-title\">Check the status</span>"));
+
+        // Two commands: the count wins over the first title.
+        let document = export(vec![
+            assistant(
+                "",
+                "",
+                vec![
+                    call(
+                        "c1",
+                        "bash",
+                        r#"{"command":"git status","description":"Check the status"}"#,
+                    ),
+                    call(
+                        "c2",
+                        "bash",
+                        r#"{"command":"make","description":"Build it"}"#,
+                    ),
                 ],
-                timings: None,
-            }),
-            run("c1", "bash"),
-            run("c2", "bash"),
-            run("c3", "edit"),
-            run("c4", "bash"),
-            run("c5", "edit"),
+                None,
+            ),
+            tool(
+                "c1",
+                "bash",
+                r#"{"command":"git status","description":"Check the status"}"#,
+            ),
+            tool(
+                "c2",
+                "bash",
+                r#"{"command":"make","description":"Build it"}"#,
+            ),
         ]);
 
-        // The header summarizes the calls, counting each tool in
-        // order of its first call, with the exact list in the
-        // tooltip.
-        assert!(document.contains(
-            "<span class=\"step-tools\" title=\"bash, bash, edit, bash, edit\">Ran 3 commands, edited 2 files</span>"
-        ));
+        assert!(document.contains("<span class=\"turn-summary\">Ran 2 commands</span>"));
     }
 
     #[test]
-    fn an_unknown_tool_is_summarized_by_name() {
-        let call = reason::tool::Call {
-            id: "c1".to_owned().into(),
-            name: "grep".to_owned(),
-            arguments: r#"{"pattern":"x"}"#.to_owned(),
-        };
-
+    fn a_run_of_unknown_tools_falls_back_to_catching_up() {
+        // Unknown tools are not counted in the summary, the way
+        // the app does not count them.
         let document = export(vec![
-            session::Item::Assistant(session::Reply {
-                prompt: Default::default(),
-                reasoning: String::new(),
-                content: String::new(),
-                tool_calls: vec![call.clone(), call.clone()],
-                timings: None,
-            }),
-            session::Item::Tool(session::ToolRun {
-                call: call.clone(),
-                status: session::Status::Success {
-                    output: Output::new(),
-                },
-            }),
-            session::Item::Tool(session::ToolRun {
-                call,
-                status: session::Status::Success {
-                    output: Output::new(),
-                },
-            }),
+            assistant(
+                "",
+                "",
+                vec![
+                    call("c1", "grep", r#"{"pattern":"x"}"#),
+                    call("c2", "grep", r#"{"pattern":"x"}"#),
+                ],
+                None,
+            ),
+            tool("c1", "grep", r#"{"pattern":"x"}"#),
+            tool("c2", "grep", r#"{"pattern":"x"}"#),
         ]);
 
-        assert!(document.contains(
-            "<span class=\"step-tools\" title=\"grep, grep\">Called grep 2 times</span>"
-        ));
+        assert!(document.contains("<span class=\"turn-summary\">Catching up...</span>"));
+
+        // The runs still render, with their raw arguments.
+        assert_eq!(document.matches("item tool success").count(), 2);
+        assert!(document.contains("tool-block arguments"));
+        assert!(document.contains("pattern"));
     }
 
     #[test]
-    fn a_turn_carries_its_message_and_the_answer_is_separate() {
-        // A turn carries its own message (content) together with its
-        // tool calls; the final answer is a separate assistant,
-        // rendered on its own.
+    fn a_failed_tool_marks_its_run() {
         let document = export(vec![
-            session::Item::Assistant(session::Reply {
-                prompt: Default::default(),
-                reasoning: String::new(),
-                content: "Let me check the locking and the layout.".to_owned(),
-                tool_calls: vec![reason::tool::Call {
-                    id: "c1".to_owned().into(),
-                    name: "read".to_owned(),
-                    arguments: r#"{"path":"file.rs"}"#.to_owned(),
-                }],
-                timings: None,
-            }),
+            assistant(
+                "",
+                "",
+                vec![call("call_1", "bash", r#"{"command":"false"}"#)],
+                None,
+            ),
             session::Item::Tool(session::ToolRun {
-                call: reason::tool::Call {
-                    id: "c1".to_owned().into(),
-                    name: "read".to_owned(),
-                    arguments: r#"{"path":"file.rs"}"#.to_owned(),
-                },
-                status: session::Status::Success {
-                    output: Output::new(),
-                },
-            }),
-            session::Item::Assistant(session::Reply {
-                prompt: Default::default(),
-                reasoning: String::new(),
-                content: "Yes, it is workable.".to_owned(),
-                tool_calls: vec![],
-                timings: None,
-            }),
-        ]);
-
-        // The turn's message is shown on its own, before the step it
-        // introduces; the step carries the tools, not the message.
-        let message = document
-            .find("<div class=\"item assistant\"><p>Let me check the locking and the layout.</p>")
-            .unwrap();
-        let step = document.find("<div class=\"step\">").unwrap();
-        let answer = document
-            .find("<div class=\"item assistant\"><p>Yes, it is workable.</p>")
-            .unwrap();
-        assert!(message < step);
-        assert!(step < answer);
-        assert!(document.contains("<span class=\"step-tools\" title=\"read\">Read 1 file</span>"));
-
-        // The step carries the tool run, not the message.
-        let step_html = &document[step..answer];
-        assert!(step_html.contains("item tool success"));
-        assert!(!step_html.contains("Let me check the locking and the layout."));
-
-        // The final answer is a plain assistant, rendered on its own.
-        assert!(document.contains("<div class=\"item assistant\"><p>Yes, it is workable.</p>"));
-    }
-
-    #[test]
-    fn a_failed_tool_marks_its_step() {
-        let document = export(vec![
-            session::Item::Assistant(session::Reply {
-                prompt: Default::default(),
-                reasoning: String::new(),
-                content: String::new(),
-                tool_calls: vec![reason::tool::Call {
-                    id: "call_1".to_owned().into(),
-                    name: "bash".to_owned(),
-                    arguments: r#"{"command":"false"}"#.to_owned(),
-                }],
-                timings: None,
-            }),
-            session::Item::Tool(session::ToolRun {
-                call: reason::tool::Call {
-                    id: "call_1".to_owned().into(),
-                    name: "bash".to_owned(),
-                    arguments: r#"{"command":"false"}"#.to_owned(),
-                },
+                call: call("call_1", "bash", r#"{"command":"false"}"#),
                 status: session::Status::Error {
                     output: "boom".to_owned(),
                 },
             }),
         ]);
 
-        // The step carries the `failed` marker; its (only) tool run
-        // sits behind the header and no content message is shown.
-        assert!(document.contains("<div class=\"step failed\">"));
+        // The turn is in flight with a single run, so the run
+        // stands in for the group; it and its output carry the
+        // error status.
+        assert!(!document.contains("<details class=\"turn"));
         assert!(document.contains("item tool error"));
-        assert!(!document.contains(" open"));
-        assert!(document.contains("boom"));
-    }
-
-    #[test]
-    fn a_content_message_is_shown_before_its_step() {
-        let mut first = Output::new();
-        first.push("built".to_owned());
-        let mut last = Output::new();
-        last.push("a b c".to_owned());
-
-        let document = export(vec![
-            session::Item::Assistant(session::Reply {
-                prompt: Default::default(),
-                reasoning: "build it, then look".to_owned(),
-                content: "All fixed.".to_owned(),
-                tool_calls: vec![
-                    reason::tool::Call {
-                        id: "c1".to_owned().into(),
-                        name: "bash".to_owned(),
-                        arguments: r#"{"command":"make"}"#.to_owned(),
-                    },
-                    reason::tool::Call {
-                        id: "c2".to_owned().into(),
-                        name: "edit".to_owned(),
-                        arguments: r#"{"path":"a.rs","old_string":"x","new_string":"y"}"#
-                            .to_owned(),
-                    },
-                ],
-                timings: None,
-            }),
-            session::Item::Tool(session::ToolRun {
-                call: reason::tool::Call {
-                    id: "c1".to_owned().into(),
-                    name: "bash".to_owned(),
-                    arguments: r#"{"command":"make"}"#.to_owned(),
-                },
-                status: session::Status::Success { output: first },
-            }),
-            session::Item::Tool(session::ToolRun {
-                call: reason::tool::Call {
-                    id: "c2".to_owned().into(),
-                    name: "edit".to_owned(),
-                    arguments: r#"{"path":"a.rs","old_string":"x","new_string":"y"}"#.to_owned(),
-                },
-                status: session::Status::Success { output: last },
-            }),
-        ]);
-
-        // The turn's message is shown on its own, before the step it
-        // introduces.
-        let message = document
-            .find("<div class=\"item assistant\"><p>All fixed.</p>")
-            .unwrap();
-        let step = document.find("<div class=\"step\">").unwrap();
-        assert!(message < step);
-
-        // The step names both tools and carries the reasoning and tool
-        // runs, but not the message.
-        let step_html = &document[step..document.find("</main>").unwrap()];
-        assert!(step_html.contains(
-            "<span class=\"step-tools\" title=\"bash, edit\">Ran 1 command, edited 1 file</span>"
-        ));
-        assert!(step_html.contains("build it, then look"));
-        assert!(step_html.contains("item tool success"));
-        assert!(!step_html.contains("All fixed."));
-    }
-
-    #[test]
-    fn fenced_code_blocks_are_highlighted() {
-        let code = "```rust\nlet x = 1;\n```\n";
-
-        let document = export(vec![session::Item::User(code.to_owned())]);
-
-        let open = document
-            .find("class=\"language-rust\"")
-            .expect("the block keeps its language");
-
-        let block = &document[open..document[open..].find("</code>").unwrap() + open];
-
-        // The keyword is highlighted with the theme's primary
-        // color, the constant with the danger color.
-        assert!(block.contains("style=\"color:#89b4fa;\">let</span>"));
-        assert!(block.contains("style=\"color:#f38ba8;\">1</span>"));
+        assert!(document.contains("<pre class=\"tool-block output error\">boom</pre>"));
     }
 
     #[test]
@@ -1786,35 +1814,59 @@ mod tests {
         output.push("line 2".to_owned());
 
         let document = export(vec![session::Item::Tool(session::ToolRun {
-            call: reason::tool::Call {
-                id: "call_1".to_owned().into(),
-                name: "bash".to_owned(),
-                arguments: r#"{"command":"git status","title":"Check the status"}"#.to_owned(),
-            },
+            call: call(
+                "call_1",
+                "bash",
+                r#"{"command":"git status","description":"Check the status"}"#,
+            ),
             status: session::Status::Success { output },
         })]);
 
         assert!(document.contains("<details class=\"item tool success\">"));
         assert!(document.contains("<span class=\"tool-title\">Check the status</span>"));
 
-        // The view is the command with a `$` prompt, not the raw JSON.
+        // The view is the command with a `$` prompt, not the raw
+        // JSON.
         assert!(document.contains("tool-block view\">$ "));
         assert!(document.contains("status"));
         assert!(!document.contains("tool-block arguments"));
 
-        // The output is rendered in full.
-        assert!(document.contains("<pre class=\"tool-block output\">line 1\nline 2</pre>"));
+        // The short output renders in full, bordered by its
+        // status.
+        assert!(document.contains("<pre class=\"tool-block output success\">line 1\nline 2</pre>"));
+    }
+
+    #[test]
+    fn an_overlong_bash_title_is_cut_at_a_word_boundary() {
+        // 64 characters: over the tool's 60-character title width.
+        let title = "a ".repeat(30) + "zzz";
+
+        let document = export(vec![session::Item::Tool(session::ToolRun {
+            call: call(
+                "call_1",
+                "bash",
+                &format!(r#"{{"command":"true","description":"{title}"}}"#),
+            ),
+            status: session::Status::Success {
+                output: Output::new(),
+            },
+        })]);
+
+        // The title is cut at the last word boundary within the
+        // width, with an ellipsis for what fell off.
+        let cut = "a ".repeat(29) + "a…";
+        assert!(document.contains(&format!("<span class=\"tool-title\">{cut}</span>")));
+        assert!(!document.contains("zzz"));
     }
 
     #[test]
     fn an_edit_tool_shows_its_diff() {
         let document = export(vec![session::Item::Tool(session::ToolRun {
-            call: reason::tool::Call {
-                id: "call_1".to_owned().into(),
-                name: "edit".to_owned(),
-                arguments: r#"{"path":"a.rs","old_string":"let x = 1;","new_string":"let x = 2;"}"#
-                    .to_owned(),
-            },
+            call: call(
+                "call_1",
+                "edit",
+                r#"{"path":"a.rs","old_string":"let x = 1;","new_string":"let x = 2;"}"#,
+            ),
             status: session::Status::Success {
                 output: Output::new(),
             },
@@ -1834,11 +1886,11 @@ mod tests {
     #[test]
     fn a_write_tool_shows_its_content() {
         let document = export(vec![session::Item::Tool(session::ToolRun {
-            call: reason::tool::Call {
-                id: "call_1".to_owned().into(),
-                name: "write".to_owned(),
-                arguments: r#"{"path":"a.rs","content":"let s = \"hi\";"}"#.to_owned(),
-            },
+            call: call(
+                "call_1",
+                "write",
+                r#"{"path":"a.rs","content":"let s = \"hi\";"}"#,
+            ),
             status: session::Status::Success {
                 output: Output::new(),
             },
@@ -1856,28 +1908,21 @@ mod tests {
     #[test]
     fn a_read_tool_shows_no_body_and_an_unknown_tool_keeps_its_arguments() {
         let read = export(vec![session::Item::Tool(session::ToolRun {
-            call: reason::tool::Call {
-                id: "call_1".to_owned().into(),
-                name: "read".to_owned(),
-                arguments: r#"{"path":"a.rs","offset":3,"limit":10}"#.to_owned(),
-            },
+            call: call("call_1", "read", r#"{"path":"a.rs","offset":3,"limit":10}"#),
             status: session::Status::Success {
                 output: Output::new(),
             },
         })]);
 
-        // A read's title carries its path; it has no view body.
-        assert!(read.contains("<span class=\"tool-title\">a.rs</span>"));
+        // A read's title carries its path and range; it has no
+        // view body.
+        assert!(read.contains("<span class=\"tool-title\">a.rs (3..13)</span>"));
         let body = &read[read.find("<main").unwrap()..read.find("</main>").unwrap()];
         assert!(!body.contains("tool-block"));
         assert!(!body.contains("diff-line"));
 
         let mystery = export(vec![session::Item::Tool(session::ToolRun {
-            call: reason::tool::Call {
-                id: "call_1".to_owned().into(),
-                name: "mystery".to_owned(),
-                arguments: r#"{"foo":"bar"}"#.to_owned(),
-            },
+            call: call("call_1", "mystery", r#"{"foo":"bar"}"#),
             status: session::Status::Success {
                 output: Output::new(),
             },
@@ -1890,7 +1935,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_outputs_are_capped_and_anchored_at_their_end() {
+    fn a_long_tool_output_keeps_every_line_and_scrolls() {
         let mut output = Output::new();
 
         for line in 0..20 {
@@ -1898,38 +1943,47 @@ mod tests {
         }
 
         let document = export(vec![session::Item::Tool(session::ToolRun {
-            call: reason::tool::Call {
-                id: "call_1".to_owned().into(),
-                name: "bash".to_owned(),
-                arguments: "{}".to_owned(),
-            },
+            call: call("call_1", "bash", "{}"),
             status: session::Status::Success { output },
         })]);
 
-        // The output block is capped at 10 lines and scrolls.
+        // The export is the full record: every line is present.
+        assert!(document.contains(">line 0\nline 1\n"));
+        assert!(document.contains("line 18\nline 19</pre>"));
+
+        // The block is capped at 10 lines and scrolls its
+        // overflow, anchored at its end when the tool opens.
         assert!(document.contains("max-height: 16.5em"));
         assert!(document.contains("overflow-y: auto"));
-        assert!(document.contains("<pre class=\"tool-block output\">"));
-
-        // On load, the outputs are anchored at their end.
         assert!(document.contains("block.scrollTop = block.scrollHeight"));
+        assert!(!document.contains("elided"));
     }
 
     #[test]
     fn a_tool_error_renders_its_message() {
         let document = export(vec![session::Item::Tool(session::ToolRun {
-            call: reason::tool::Call {
-                id: "call_1".to_owned().into(),
-                name: "bash".to_owned(),
-                arguments: r#"{"command":"false"}"#.to_owned(),
-            },
+            call: call("call_1", "bash", r#"{"command":"false"}"#),
             status: session::Status::Error {
                 output: "boom & bap < 0".to_owned(),
             },
         })]);
 
         assert!(document.contains("<details class=\"item tool error\">"));
-        assert!(document.contains("boom &amp; bap &lt; 0"));
+        assert!(
+            document.contains("<pre class=\"tool-block output error\">boom &amp; bap &lt; 0</pre>")
+        );
+    }
+
+    #[test]
+    fn an_empty_error_output_renders_its_placeholder() {
+        let document = export(vec![session::Item::Tool(session::ToolRun {
+            call: call("call_1", "bash", r#"{"command":"false"}"#),
+            status: session::Status::Error {
+                output: "   ".to_owned(),
+            },
+        })]);
+
+        assert!(document.contains("<pre class=\"tool-block output error\">[No output]</pre>"));
     }
 
     #[test]

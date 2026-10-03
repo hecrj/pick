@@ -60,6 +60,9 @@ const OUTPUT: &str = "-o";
 /// browser.
 const OPEN: &str = "--open";
 
+/// The flag that titles the exported document.
+const TITLE: &str = "--title";
+
 /// The maximum width of the content area
 const MAX_CONTENT_WIDTH: u32 = 770;
 
@@ -105,7 +108,20 @@ fn main() -> Result<(), iced::Error> {
 
         let open = args.iter().any(|arg| arg.as_str() == OPEN);
 
-        export(&project, session_path.as_deref(), output.as_deref(), open);
+        let title = args
+            .iter()
+            .position(|arg| arg.as_str() == TITLE)
+            .and_then(|i| args.get(i + 1))
+            .filter(|arg| !arg.starts_with('-'))
+            .cloned();
+
+        export(
+            &project,
+            session_path.as_deref(),
+            output.as_deref(),
+            title.as_deref(),
+            open,
+        );
 
         return Ok(());
     }
@@ -159,9 +175,15 @@ fn main() -> Result<(), iced::Error> {
 
 /// Exports the session at `session_path`, or the newest session
 /// when the path is left out, as a standalone HTML document at
-/// `output`, or beside the session's file when it is left out;
-/// exits on failure.
-fn export(project: &Project, session_path: Option<&str>, output: Option<&str>, open: bool) {
+/// `output`, or beside the session's file when it is left out,
+/// titled `title` when one is given; exits on failure.
+fn export(
+    project: &Project,
+    session_path: Option<&str>,
+    output: Option<&str>,
+    title: Option<&str>,
+    open: bool,
+) {
     let file = match session_path {
         Some(path) => session::File::existing(project, path).unwrap_or_else(|| {
             eprintln!("no such session: {path}");
@@ -189,7 +211,7 @@ fn export(project: &Project, session_path: Option<&str>, output: Option<&str>, o
         None => file.as_ref().with_extension("html"),
     };
 
-    let document = html::export(&session, &Theme::CatppuccinMocha);
+    let document = html::export(&session, project, &Theme::CatppuccinMocha, title);
 
     std::fs::write(&output, document).unwrap_or_else(|error| {
         eprintln!("failed to write {}: {error}", output.display());
