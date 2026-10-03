@@ -1,4 +1,5 @@
 use crate::core::Project;
+use crate::core::file;
 use crate::font;
 use crate::highlight;
 use crate::tool::Output;
@@ -82,6 +83,18 @@ impl From<Arguments> for Bash {
 impl Call for Bash {
     fn title(&self, _project: &Project) -> Option<Cow<'_, str>> {
         self.title.as_deref().map(Cow::Borrowed)
+    }
+
+    fn is_sensitive(&self, _project: &Project) -> bool {
+        let command = self.command.trim();
+
+        matches!(command, "env" | "printenv" | "set" | "export")
+            || command.starts_with("git config")
+            // A word that names a credentials file — `cat ~/.env` —
+            // may leak its contents.
+            || command
+                .split_whitespace()
+                .any(|word| file::is_sensitive(word.trim_matches(['"', '\'', '`'])))
     }
 
     fn view(&self) -> Option<Element<'_, Never>> {

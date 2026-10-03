@@ -44,6 +44,10 @@ impl Call for Read {
         Some(format!("{}{offset}", project.relative(&self.path).display()).into())
     }
 
+    fn is_sensitive(&self, _project: &Project) -> bool {
+        file::is_sensitive(&self.path)
+    }
+
     fn run(&self, project: &Path) -> call::Run {
         let path = self.path.clone();
         let offset = self.offset;

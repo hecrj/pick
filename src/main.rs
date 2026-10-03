@@ -63,6 +63,9 @@ const OPEN: &str = "--open";
 /// The flag that titles the exported document.
 const TITLE: &str = "--title";
 
+/// The flag that exports the document raw, concealing nothing.
+const RAW: &str = "--raw";
+
 /// The maximum width of the content area
 const MAX_CONTENT_WIDTH: u32 = 770;
 
@@ -104,9 +107,11 @@ fn main() -> Result<(), iced::Error> {
             .iter()
             .position(|arg| arg.as_str() == OUTPUT)
             .and_then(|i| args.get(i + 1))
+            .filter(|arg| !arg.starts_with('-'))
             .cloned();
 
         let open = args.iter().any(|arg| arg.as_str() == OPEN);
+        let raw = args.iter().any(|arg| arg.as_str() == RAW);
 
         let title = args
             .iter()
@@ -121,6 +126,7 @@ fn main() -> Result<(), iced::Error> {
             output.as_deref(),
             title.as_deref(),
             open,
+            raw,
         );
 
         return Ok(());
@@ -183,6 +189,7 @@ fn export(
     output: Option<&str>,
     title: Option<&str>,
     open: bool,
+    raw: bool,
 ) {
     let file = match session_path {
         Some(path) => session::File::existing(project, path).unwrap_or_else(|| {
@@ -211,7 +218,8 @@ fn export(
         None => file.as_ref().with_extension("html"),
     };
 
-    let document = html::export(&session, project, &Theme::CatppuccinMocha, title);
+    let (document, redactions) =
+        html::export(&session, project, &Theme::CatppuccinMocha, title, raw);
 
     std::fs::write(&output, document).unwrap_or_else(|error| {
         eprintln!("failed to write {}: {error}", output.display());
@@ -219,6 +227,13 @@ fn export(
     });
 
     println!("exported: {}", output.display());
+
+    if !redactions.is_empty() {
+        println!(
+            "redacted {} spans and {} blocks",
+            redactions.masked, redactions.blocks
+        );
+    }
 
     if open {
         open_document(&output);

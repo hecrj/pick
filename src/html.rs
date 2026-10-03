@@ -6,6 +6,7 @@ use crate::{diff, font, highlight, item, locale, tool};
 use iced::highlighter;
 use iced::theme::palette;
 use iced::{Color, Theme, time};
+use std::ops::Range;
 
 /// The static styles of the document, colored by the `:root`
 /// variables generated from the theme.
@@ -189,6 +190,12 @@ summary.turn-header::-webkit-details-marker,
    its view and output. */
 .tool-header {
     cursor: pointer;
+}
+
+/* The comment's text is padded, the way the app pads its
+   markdown container. */
+.review-content {
+    padding: 10px;
 }
 
 .tool-name,
@@ -425,11 +432,100 @@ for (const tool of document.querySelectorAll('details.item.tool')) {
 }
 "#;
 
-/// Exports the session as a standalone HTML document, styled
-/// by `theme`, with the tool titles relative to `project`, and
-/// titled `title` when one is given.
-pub fn export(session: &Session, project: &Project, theme: &Theme, title: Option<&str>) -> String {
-    let items = render_items(&session.items, project, theme);
+/// The tally of what an export concealed: the spans of text it
+/// masked, and the blocks it replaced with a redaction notice.
+#[derive(Default, Debug, PartialEq, Eq)]
+pub struct Redactions {
+    /// The spans masked: secrets and home paths.
+    pub masked: usize,
+    /// The blocks replaced: the views and outputs of calls that
+    /// may expose credentials.
+    pub blocks: usize,
+}
+
+impl Redactions {
+    /// Whether nothing was concealed.
+    pub fn is_empty(&self) -> bool {
+        self.masked == 0 && self.blocks == 0
+    }
+}
+
+/// The context of an export being rendered: the document it
+/// builds, what it renders against, and how it treats sensitive
+/// content. Every byte of the document is written through its
+/// writers — `tag` for an element, `text` for content, `html`
+/// for trusted markup.
+struct Render<'a> {
+    /// The document, built in order.
+    html: String,
+    project: &'a Project,
+    theme: &'a Theme,
+    /// Whether the export is raw: it conceals nothing.
+    raw: bool,
+    /// The tally of what the export has concealed so far.
+    redactions: Redactions,
+}
+
+impl Render<'_> {
+    /// Writes an element: its start tag, the content the closure
+    /// writes, and its end tag.
+    fn tag<F: FnOnce(&mut Self)>(&mut self, name: &str, attrs: &str, content: F) {
+        self.html.push_str(&format!("<{name}{attrs}>"));
+        content(self);
+        self.html.push_str(&format!("</{name}>"));
+    }
+
+    /// Writes trusted markup as-is: the document's static
+    /// structure, and the output of the fragment builders, which
+    /// escape and redact what they contain.
+    fn html(&mut self, markup: &str) {
+        self.html.push_str(markup);
+    }
+
+    /// Redacts `text`, tallying the concealment — or passes it
+    /// through when the export is raw.
+    fn redact(&mut self, text: &str) -> String {
+        if self.raw {
+            return text.to_owned();
+        }
+
+        let (text, masked) = redact(text);
+        self.redactions.masked += masked;
+        text
+    }
+
+    /// Writes `text`, redacted and escaped.
+    fn text(&mut self, text: &str) {
+        let text = escape(&self.redact(text));
+        self.html.push_str(&text);
+    }
+
+    /// The notice that replaces a block that may expose
+    /// credentials, tallying the concealment.
+    fn conceal(&mut self) -> &'static str {
+        self.redactions.blocks += 1;
+        "[redacted: may contain credentials]"
+    }
+}
+
+/// Exports `session` as a standalone HTML document, styled by
+/// `theme`, unless `raw`, in which case the content is exported
+/// verbatim. Returns the document and the tally of what it
+/// concealed.
+pub fn export(
+    session: &Session,
+    project: &Project,
+    theme: &Theme,
+    title: Option<&str>,
+    raw: bool,
+) -> (String, Redactions) {
+    let mut render = Render {
+        html: String::new(),
+        project,
+        theme,
+        raw,
+        redactions: Redactions::default(),
+    };
 
     let started = jiff::Timestamp::try_from(session.started_at)
         .ok()
@@ -448,37 +544,51 @@ pub fn export(session: &Session, project: &Project, theme: &Theme, title: Option
         format!("{count} items")
     };
 
-    // The document's title, escaped: the given one, or the
-    // default. A given title also headlines the session, above
-    // its metadata.
-    let title = title.filter(|title| !title.is_empty()).map(escape);
-    let heading = title
-        .as_ref()
-        .map(|title| format!("<h1 class=\"session-title\">{title}</h1>"))
-        .unwrap_or_default();
+    // The given title, or none: it headlines the session, above
+    // its metadata, and names the document.
+    let title = title.filter(|title| !title.is_empty());
 
-    format!(
+    render.html(
         "<!doctype html>\n\
          <html lang=\"en\">\n\
          <head>\n\
          <meta charset=\"utf-8\">\n\
-         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-         <title>{title}</title>\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n",
+    );
+
+    render.tag("title", "", |r| r.text(title.unwrap_or("Piolet session")));
+
+    render.html(&format!(
+        "\n\
          <style>\n{style}\n</style>\n\
          </head>\n\
          <body>\n\
          <main class=\"session\">\n\
-         <header class=\"session-header\">{heading}<div class=\"session-meta\">{started} · {count} · Piolet {version}</div></header>\n\
-         {items}\n\
-         </main>\n\
-         <script>{script}</script>\n\
-         </body>\n\
-         </html>\n",
-        title = title.unwrap_or_else(|| "Piolet session".to_owned()),
+         <header class=\"session-header\">",
         style = style(theme),
-        version = env!("CARGO_PKG_VERSION"),
-        script = SCRIPT.trim(),
-    )
+    ));
+
+    if let Some(title) = title {
+        render.tag("h1", " class=\"session-title\"", |r| r.text(title));
+    }
+
+    render.tag("div", " class=\"session-meta\"", |r| {
+        r.text(&format!(
+            "{started} · {count} · Piolet {}",
+            env!("CARGO_PKG_VERSION")
+        ));
+    });
+
+    render.html("</header>\n");
+
+    items(&session.items, &mut render);
+
+    render.html(&format!(
+        "</main>\n<script>{}</script>\n</body>\n</html>\n",
+        SCRIPT.trim()
+    ));
+
+    (render.html, render.redactions)
 }
 
 /// The `<style>` block of the document: the `:root` variables
@@ -542,40 +652,32 @@ fn style(theme: &Theme) -> String {
         link = hex(seed.primary),
     )
 }
-
 /// Renders the session's items the way the app renders its
-/// `Turn`s: a user message, review, or compaction stands on its
-/// own; every other run — message-less replies and tool runs —
-/// groups into a turn, which the message that concludes it
-/// follows, if any. A turn revealing a single item inlines it
-/// instead of grouping it.
-fn render_items(items: &[session::Item], project: &Project, theme: &Theme) -> String {
-    let mut html = String::new();
+/// `Turn`s: a user message, review, or compaction stands on
+/// its own; every other run — message-less replies and tool
+/// runs — groups into a turn, the way the app's `Turn::Work`
+/// does.
+fn items(items: &[session::Item], render: &mut Render<'_>) {
     let mut i = 0;
 
     while i < items.len() {
         let start = i;
 
         loop {
-            let item = &items[i];
+            let current = &items[i];
             i += 1;
 
-            match item {
+            match current {
                 session::Item::User(_)
                 | session::Item::Review(_)
                 | session::Item::Compaction(_) => {
-                    html.push_str(&render_item(item, theme));
+                    item(current, render);
                     break;
                 }
                 session::Item::Assistant(reply) if !reply.content.is_empty() => {
-                    // The message concludes the turn the run it
-                    // belongs to makes.
-                    html.push_str(&render_turn(
-                        &items[start..i],
-                        i == items.len(),
-                        project,
-                        theme,
-                    ));
+                    // The message concludes the turn the run
+                    // it belongs to makes.
+                    turn(&items[start..i], i == items.len(), render);
                     break;
                 }
                 _ => {
@@ -586,15 +688,10 @@ fn render_items(items: &[session::Item], project: &Project, theme: &Theme) -> St
                             | session::Item::Review(_)
                             | session::Item::Compaction(_),
                         ) => {
-                            // The run ends at a standalone item, or
-                            // with the session; the turn is in
-                            // flight when the session ends.
-                            html.push_str(&render_turn(
-                                &items[start..i],
-                                i == items.len(),
-                                project,
-                                theme,
-                            ));
+                            // The run ends at a standalone item,
+                            // or with the session; the turn is
+                            // in flight when the session ends.
+                            turn(&items[start..i], i == items.len(), render);
                             break;
                         }
                         _ => {}
@@ -603,24 +700,16 @@ fn render_items(items: &[session::Item], project: &Project, theme: &Theme) -> St
             }
         }
     }
-
-    html
 }
 
-/// Renders a run of message-less replies and tool runs as a
-/// turn, the way the app renders a `Turn::Work`: a bordered
-/// header summarizes the work, the work itself sits behind it,
-/// and the message that concludes it, if any, follows on its
-/// own. A turn of a single item inlines the item instead, as
-/// its own header already carries the work. The turn that ends
-/// a session with no concluding message starts open, as the app
-/// forces its in-flight turn open.
-fn render_turn(
-    turn: &[session::Item],
-    ends_session: bool,
-    project: &Project,
-    theme: &Theme,
-) -> String {
+/// Renders a turn, the way the app renders a `Turn::Work`: a
+/// bordered header summarizes the work, the work itself sits
+/// behind it, and the message that concludes it, if any,
+/// follows on its own. A turn of a single item inlines the
+/// item instead, as its own header already carries the work.
+/// The turn that ends a session with no concluding message
+/// starts open, as the app forces its in-flight turn open.
+fn turn(turn: &[session::Item], ends_session: bool, render: &mut Render<'_>) {
     // The message that concludes the turn, if any.
     let reply = match turn.last() {
         Some(session::Item::Assistant(reply)) if !reply.content.is_empty() => Some(reply),
@@ -630,47 +719,290 @@ fn render_turn(
     let open = ends_session && reply.is_none();
 
     // Every reply's reasoning and tool run, revealed by the
-    // header.
-    let mut body = String::new();
-    let mut items = 0;
+    // header; a single item needs no group of its own, as it
+    // stands in for the turn.
+    let mut body = 0;
 
     for item in turn {
         match item {
-            session::Item::Assistant(reply) => {
-                if let Some(reasoning) = render_reasoning(reply, theme) {
-                    body.push_str(&reasoning);
-                    items += 1;
-                }
-            }
-            session::Item::Tool(run) => {
-                body.push_str(&render_tool(run, project, theme));
-                items += 1;
-            }
+            session::Item::Assistant(reply) if !reply.reasoning.is_empty() => body += 1,
+            session::Item::Tool(_) => body += 1,
             _ => {}
         }
     }
 
-    // A turn of a single item needs no group of its own: the
-    // item stands in its place.
-    let mut html = if items == 1 {
-        body
-    } else {
-        format!(
-            "<details class=\"turn\"{open}><summary class=\"turn-header\"><span class=\"turn-summary\">{}</span><span class=\"arrow\"></span></summary><div class=\"turn-body\">{}</div></details>",
-            escape(&summary_of(turn, project)),
-            body,
-            open = if open { " open" } else { "" },
-        )
-    };
+    if body != 1 {
+        let attrs = if open {
+            " class=\"turn\" open"
+        } else {
+            " class=\"turn\""
+        };
 
-    if let Some(reply) = reply {
-        html.push_str(&format!(
-            "<div class=\"item assistant\">{}</div>",
-            markdown(&reply.content, theme)
-        ));
+        render.tag("details", attrs, |r| {
+            r.tag("summary", " class=\"turn-header\"", |r| {
+                let summary = summary_of(turn, r.project);
+                r.tag("span", " class=\"turn-summary\"", |r| r.text(&summary));
+                r.tag("span", " class=\"arrow\"", |_| {});
+            });
+            r.tag("div", " class=\"turn-body\"", |r| {
+                for item in turn {
+                    match item {
+                        session::Item::Assistant(reply) => reasoning(reply, r),
+                        session::Item::Tool(run) => tool(run, r),
+                        _ => {}
+                    }
+                }
+            });
+        });
+    } else {
+        for item in turn {
+            match item {
+                session::Item::Assistant(reply) => reasoning(reply, render),
+                session::Item::Tool(run) => tool(run, render),
+                _ => {}
+            }
+        }
     }
 
-    html
+    if let Some(reply) = reply {
+        let content = markdown(&reply.content, render);
+        render.tag("div", " class=\"item assistant\"", |r| r.html(&content));
+    }
+}
+
+/// Renders an item that stands on its own — a user message, a
+/// review, or a compaction. Assistant and tool runs group
+/// into turns and never stand alone.
+fn item(item: &session::Item, render: &mut Render<'_>) {
+    match item {
+        session::Item::User(content) => {
+            let content = markdown(content, render);
+            render.tag("div", " class=\"item user\"", |r| {
+                r.tag("div", " class=\"bubble\"", |r| r.html(&content));
+            });
+        }
+        session::Item::Compaction(compaction) => {
+            render.tag("div", " class=\"item compaction\"", |r| {
+                r.text(&format!(
+                    "Compacted into {} tokens",
+                    locale::thousands(compaction.tokens)
+                ));
+            });
+        }
+        session::Item::Review(review) => {
+            render.tag("div", " class=\"item review\"", |r| {
+                if let Some(message) = &review.message {
+                    let message = markdown(message, r);
+                    r.tag("div", " class=\"bubble\"", |r| r.html(&message));
+                }
+
+                for comment in &review.comments {
+                    r.tag("div", " class=\"review-comment\"", |r| {
+                        r.tag("div", " class=\"review-header\"", |r| {
+                            r.tag("span", " class=\"tool-name\"", |r| r.text("review"));
+                            r.tag("span", " class=\"review-index\"", |r| {
+                                r.text(&format!("{}:{}", comment.path, comment.number));
+                            });
+                        });
+
+                        let hunk = hunk(&comment.hunk, r);
+                        let content = markdown(&comment.content, r);
+                        r.tag("div", " class=\"diff\"", |r| r.html(&hunk));
+                        r.tag("div", " class=\"review-content\"", |r| r.html(&content));
+                    });
+                }
+            });
+        }
+        session::Item::Assistant(_) | session::Item::Tool(_) => {
+            // Assistant and tool runs group into turns; they
+            // are rendered by `turn`, never on their own.
+        }
+    }
+}
+
+/// Renders one reply's reasoning as a collapsed block, if it
+/// has any: the header carries its duration, the way the
+/// app's compact reasoning does.
+fn reasoning(reply: &session::Reply, render: &mut Render<'_>) {
+    if reply.reasoning.is_empty() {
+        return;
+    }
+
+    let is_done = !reply.content.is_empty() || !reply.tool_calls.is_empty();
+
+    let summary = match reply.timings {
+        Some(timings) => {
+            if is_done {
+                format!("Thought for {}", item::duration(timings.reasoning))
+            } else {
+                format!("Thinking... ({})", item::duration(timings.reasoning))
+            }
+        }
+        None => {
+            if is_done {
+                "Thought".to_owned()
+            } else {
+                "Thinking...".to_owned()
+            }
+        }
+    };
+
+    let reasoning = markdown(&reply.reasoning, render);
+
+    // The `item` class gives the box its margin, which it
+    // needs once a turn inlines it.
+    render.tag("details", " class=\"item reasoning\"", |r| {
+        r.tag("summary", "", |r| {
+            r.tag("span", "", |r| r.text(&summary));
+            r.tag("span", " class=\"arrow\"", |_| {});
+        });
+        r.tag("div", "", |r| r.html(&reasoning));
+    });
+}
+
+/// Renders one tool run as a collapsed block, the way the
+/// app renders a tool: the badge and title are the summary,
+/// and the view and the output — bordered by its status —
+/// sit behind it. A run that may expose credentials conceals
+/// the block it would leak: an `env`-listing bash or a
+/// credentials read its output, a credentials write or edit
+/// its view.
+fn tool(run: &session::ToolRun, render: &mut Render<'_>) {
+    let status = match &run.status {
+        session::Status::Success { .. } => "success",
+        session::Status::Error { .. } => "error",
+        session::Status::Invalid => "invalid",
+        session::Status::Aborted => "aborted",
+    };
+
+    let name = run.call.name.as_str();
+
+    let sensitive = tool::Tool::builtins()
+        .get(name)
+        .and_then(|tool| tool.parse(&run.call.arguments).ok())
+        .is_some_and(|state| state.is_sensitive(render.project));
+
+    render.tag("details", &format!(" class=\"item tool {status}\""), |r| {
+        r.tag("summary", " class=\"tool-header\"", |r| {
+            r.tag("span", " class=\"tool-name\"", |r| r.text(&run.call.name));
+
+            if let Some(title) = title_of(run, r.project) {
+                r.tag("span", " class=\"tool-title\"", |r| r.text(&title));
+            }
+        });
+
+        if !r.raw && sensitive && matches!(name, "write" | "edit") {
+            let notice = r.conceal();
+            r.tag("pre", " class=\"tool-block view\"", |r| {
+                r.tag("em", "", |r| r.text(notice));
+            });
+        } else {
+            let view = view_of(&run.call, r);
+            r.html(&view);
+        }
+
+        if !r.raw && sensitive && matches!(name, "bash" | "read") {
+            let notice = r.conceal();
+            r.tag(
+                "pre",
+                &format!(" class=\"tool-block output {status}\""),
+                |r| {
+                    r.tag("em", "", |r| r.text(notice));
+                },
+            );
+        } else {
+            match &run.status {
+                // The export keeps the full log; the block is
+                // capped and scrolls its overflow.
+                session::Status::Success { output } if output.lines() > 0 => {
+                    r.tag("pre", " class=\"tool-block output success\"", |r| {
+                        r.text(&output.all().collect::<Vec<_>>().join("\n"));
+                    });
+                }
+                // An empty output renders nothing, the way the
+                // app renders it.
+                session::Status::Success { .. } => {}
+                session::Status::Error { output } => {
+                    let output = output.trim();
+                    let output = if output.is_empty() {
+                        "[No output]"
+                    } else {
+                        output
+                    };
+                    r.tag(
+                        "pre",
+                        &format!(" class=\"tool-block output {status}\""),
+                        |r| r.text(output),
+                    );
+                }
+                session::Status::Invalid => {
+                    r.tag("pre", " class=\"tool-block output invalid\"", |r| {
+                        r.text("[invalid tool call]")
+                    });
+                }
+                session::Status::Aborted => {
+                    r.tag("pre", " class=\"tool-block output aborted\"", |r| {
+                        r.text("[execution aborted]")
+                    });
+                }
+            }
+        }
+    });
+}
+
+/// Renders the lines of a hunk as diff rows.
+fn hunk(hunk: &git::Hunk, render: &mut Render<'_>) -> String {
+    hunk.lines
+        .iter()
+        .map(|line| match line {
+            git::Line::Context { old, new, text } => {
+                row("context", "", Some(*old), Some(*new), text, render)
+            }
+            git::Line::Added { new, text } => row("added", "+", None, Some(*new), text, render),
+            git::Line::Deleted { old, text } => row("deleted", "-", Some(*old), None, text, render),
+        })
+        .collect()
+}
+
+fn row(
+    class: &str,
+    sign: &str,
+    old: Option<usize>,
+    new: Option<usize>,
+    text: &str,
+    render: &mut Render<'_>,
+) -> String {
+    format!(
+        "<div class=\"diff-line {class}\"><span class=\"gutter\">{}</span><span class=\"gutter\">{}</span><span class=\"sign\">{sign}</span><span class=\"text\">{}</span></div>",
+        old.map_or_else(String::new, |number| number.to_string()),
+        new.map_or_else(String::new, |number| number.to_string()),
+        escape(&render.redact(text))
+    )
+}
+
+/// Renders `markdown` as HTML, highlighting the code blocks.
+fn markdown(markdown: &str, render: &mut Render<'_>) -> String {
+    use pulldown_cmark::{Options, Parser, html};
+
+    // The same extensions the app's markdown widget enables.
+    let options = Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
+        | Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS
+        | Options::ENABLE_TABLES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS;
+
+    let markdown = render.redact(markdown);
+
+    // `push_html` passes raw HTML through, so prose like
+    // `Range<usize>` would become a tag; escape such `<` in the
+    // source first, leaving code regions to `push_html`.
+    let source = escape_raw_html(&markdown);
+
+    let mut document = String::new();
+
+    html::push_html(&mut document, Parser::new_ext(&source, options));
+
+    highlight_code_blocks(document, render.theme)
 }
 
 /// The summary of a turn's work, the way the app summarizes a
@@ -754,44 +1086,10 @@ fn capitalize(text: &str) -> String {
     }
 }
 
-/// The reasoning of a reply as a collapsed block, if it has any:
-/// the header carries its duration, the way the app's compact
-/// reasoning does.
-fn render_reasoning(reply: &session::Reply, theme: &Theme) -> Option<String> {
-    if reply.reasoning.is_empty() {
-        return None;
-    }
-
-    let is_done = !reply.content.is_empty() || !reply.tool_calls.is_empty();
-
-    let summary = match reply.timings {
-        Some(timings) => {
-            if is_done {
-                format!("Thought for {}", item::duration(timings.reasoning))
-            } else {
-                format!("Thinking... ({})", item::duration(timings.reasoning))
-            }
-        }
-        None => {
-            if is_done {
-                "Thought".to_owned()
-            } else {
-                "Thinking...".to_owned()
-            }
-        }
-    };
-
-    Some(format!(
-        // The `item` class gives the box its margin, which it
-        // needs once a turn inlines it.
-        "<details class=\"item reasoning\"><summary><span>{summary}</span><span class=\"arrow\"></span></summary><div>{}</div></details>",
-        markdown(&reply.reasoning, theme)
-    ))
-}
-
 /// The title of a tool run, the way the app titles it: the
 /// tool's parsed state titles it — a bash's `description`, a
-/// read, write, or edit's project-relative path.
+/// read, write, or edit's project-relative path. The title is
+/// unredacted: the writer redacts it.
 fn title_of(run: &session::ToolRun, project: &Project) -> Option<String> {
     let tools = tool::Tool::builtins();
     let state = tools
@@ -799,109 +1097,7 @@ fn title_of(run: &session::ToolRun, project: &Project) -> Option<String> {
         .parse(&run.call.arguments)
         .ok()?;
 
-    state.title(project).map(|title| title.to_string())
-}
-
-/// Renders one tool run as a collapsed block, the way the app
-/// renders a tool: the badge and title are the summary, and the
-/// view and the output — bordered by its status — sit behind
-/// it.
-fn render_tool(run: &session::ToolRun, project: &Project, theme: &Theme) -> String {
-    let status = match &run.status {
-        session::Status::Success { .. } => "success",
-        session::Status::Error { .. } => "error",
-        session::Status::Invalid => "invalid",
-        session::Status::Aborted => "aborted",
-    };
-
-    let title = title_of(run, project)
-        .map(|title| format!("<span class=\"tool-title\">{}</span>", escape(&title)))
-        .unwrap_or_default();
-
-    let view = view_of(&run.call, theme);
-
-    let output = match &run.status {
-        session::Status::Success { output } if output.lines() > 0 => {
-            // The export keeps the full log; the block is capped
-            // and scrolls its overflow.
-            format!(
-                "<pre class=\"tool-block output success\">{}</pre>",
-                output.all().map(escape).collect::<Vec<_>>().join("\n")
-            )
-        }
-        // An empty output renders nothing, the way the app
-        // renders it.
-        session::Status::Success { .. } => String::new(),
-        session::Status::Error { output } => status_output("error", output),
-        session::Status::Invalid => status_output("invalid", "[invalid tool call]"),
-        session::Status::Aborted => status_output("aborted", "[execution aborted]"),
-    };
-
-    format!(
-        "<details class=\"item tool {status}\"><summary class=\"tool-header\"><span class=\"tool-name\">{name}</span>{title}</summary>{view}{output}</details>",
-        name = escape(&run.call.name)
-    )
-}
-
-/// The output of a failed run: its message, trimmed, or a
-/// placeholder when it has none, in a block bordered by its
-/// status.
-fn status_output(status: &str, content: &str) -> String {
-    let text = if content.trim().is_empty() {
-        "[No output]".to_owned()
-    } else {
-        content.trim().to_owned()
-    };
-
-    format!(
-        "<pre class=\"tool-block output {status}\">{}</pre>",
-        escape(&text)
-    )
-}
-
-/// Renders an item that stands on its own — a user message, a
-/// review, or a compaction. Assistant and tool runs group into
-/// turns and never stand alone.
-fn render_item(item: &session::Item, theme: &Theme) -> String {
-    match item {
-        session::Item::User(content) => {
-            format!(
-                "<div class=\"item user\"><div class=\"bubble\">{}</div></div>",
-                markdown(content, theme)
-            )
-        }
-        session::Item::Compaction(compaction) => format!(
-            "<div class=\"item compaction\">Compacted into {} tokens</div>",
-            locale::thousands(compaction.tokens)
-        ),
-        session::Item::Review(review) => {
-            let message = review
-                .message
-                .as_deref()
-                .map(|message| format!("<div class=\"bubble\">{}</div>", markdown(message, theme)))
-                .unwrap_or_default();
-
-            let comments = review
-                .comments
-                .iter()
-                .map(|comment| {
-                    format!(
-                        "<div class=\"review-comment\"><div class=\"review-header\"><span class=\"tool-name\">review</span><span class=\"review-index\">{}</span></div><div class=\"diff\">{}</div><div class=\"review-content\">{}</div></div>",
-                        escape(&format!("{}:{}", comment.path, comment.number)),
-                        hunk(&comment.hunk),
-                        markdown(&comment.content, theme)
-                    )
-                })
-                .collect::<String>();
-
-            format!("<div class=\"item review\">{message}{comments}</div>")
-        }
-        session::Item::Assistant(_) | session::Item::Tool(_) => {
-            // Assistant and tool runs group into turns; they are
-            // rendered by `render_turn`, never on their own.
-            String::new()
-        }
-    }
+    state.title(project).map(|title| title.into_owned())
 }
 
 /// The view of a tool call's arguments, mirroring the app's
@@ -909,61 +1105,67 @@ fn render_item(item: &session::Item, theme: &Theme) -> String {
 /// `write`, the diff of an `edit` — and nothing for a `read`,
 /// whose title carries its path. A call that cannot be parsed,
 /// or a tool without a view, falls back to its raw arguments.
-fn view_of(call: &reason::tool::Call, theme: &Theme) -> String {
+fn view_of(call: &reason::tool::Call, render: &mut Render<'_>) -> String {
     let value = match serde_json::from_str::<serde_json::Value>(&call.arguments) {
         Ok(value) => value,
-        Err(_) => return arguments_block(&call.arguments, theme),
+        Err(_) => return arguments_block(&call.arguments, render),
     };
 
     match call.name.as_str() {
         // A read carries no body; its title is its path.
         "read" => String::new(),
         // A tool without a view keeps its raw arguments.
-        name => view(name, &value).unwrap_or_else(|| arguments_block(&call.arguments, theme)),
+        name => {
+            view(name, &value, render).unwrap_or_else(|| arguments_block(&call.arguments, render))
+        }
     }
 }
 
 /// The per-tool view of the arguments, when the tool has one.
-fn view(name: &str, value: &serde_json::Value) -> Option<String> {
+fn view(name: &str, value: &serde_json::Value, render: &mut Render<'_>) -> Option<String> {
     match name {
-        "bash" => bash_view(value),
-        "write" => write_view(value),
-        "edit" => edit_view(value),
+        "bash" => bash_view(value, render),
+        "write" => write_view(value, render),
+        "edit" => edit_view(value, render),
         _ => None,
     }
 }
 
 /// The view of a `bash` call: the command, highlighted, with a `$`
 /// prompt on its first line, as the app shows it.
-fn bash_view(value: &serde_json::Value) -> Option<String> {
+fn bash_view(value: &serde_json::Value, render: &mut Render<'_>) -> Option<String> {
     let command = value.get("command")?.as_str()?;
+    let command = render.redact(command);
 
     // The line budget matches the bash tool's preview width.
-    let preview = highlight::Preview::new("bash", command, 500);
+    let preview = highlight::Preview::new("bash", &command, 500);
 
     Some(preview_block(&preview, Some("$ ")))
 }
 
 /// The view of a `write` call: the content of the file, highlighted
 /// by its language, as the app shows it.
-fn write_view(value: &serde_json::Value) -> Option<String> {
+fn write_view(value: &serde_json::Value, render: &mut Render<'_>) -> Option<String> {
     let path = value.get("path")?.as_str()?;
     let content = value.get("content")?.as_str()?;
+    let content = render.redact(content);
 
     Some(preview_block(
-        &highlight::Preview::file(path, content),
+        &highlight::Preview::file(path, &content),
         None,
     ))
 }
 
 /// The view of an `edit` call: the diff of its old and new strings,
 /// as the app shows it.
-fn edit_view(value: &serde_json::Value) -> Option<String> {
+fn edit_view(value: &serde_json::Value, render: &mut Render<'_>) -> Option<String> {
     let path = value.get("path")?.as_str()?;
     let old = value.get("old_string")?.as_str()?;
     let new = value.get("new_string")?.as_str()?;
+    let old = render.redact(old);
+    let new = render.redact(new);
 
-    let diff = diff::Diff::new(path, old, new, tool::BACKGROUND);
+    let diff = diff::Diff::new(path, &old, &new, tool::BACKGROUND);
 
     let lines = diff
         .lines
@@ -1032,10 +1234,14 @@ fn span_html(span: &iced::widget::text::Span<'static>) -> String {
 
 /// The raw arguments of a call, pretty-printed and highlighted: the
 /// fallback for a tool without a view.
-fn arguments_block(arguments: &str, theme: &Theme) -> String {
+fn arguments_block(arguments: &str, render: &mut Render<'_>) -> String {
     format!(
         "<pre class=\"tool-block arguments\"><code>{}</code></pre>",
-        highlighted("json", &arguments_of(arguments), theme)
+        highlighted(
+            "json",
+            &arguments_of(&render.redact(arguments)),
+            render.theme
+        )
     )
 }
 
@@ -1046,53 +1252,6 @@ fn arguments_of(arguments: &str) -> String {
         Err(_) => arguments.to_owned(),
     }
 }
-
-/// Renders the lines of a hunk as diff rows.
-fn hunk(hunk: &git::Hunk) -> String {
-    hunk.lines
-        .iter()
-        .map(|line| match line {
-            git::Line::Context { old, new, text } => {
-                row("context", "", Some(*old), Some(*new), text)
-            }
-            git::Line::Added { new, text } => row("added", "+", None, Some(*new), text),
-            git::Line::Deleted { old, text } => row("deleted", "-", Some(*old), None, text),
-        })
-        .collect()
-}
-
-fn row(class: &str, sign: &str, old: Option<usize>, new: Option<usize>, text: &str) -> String {
-    format!(
-        "<div class=\"diff-line {class}\"><span class=\"gutter\">{}</span><span class=\"gutter\">{}</span><span class=\"sign\">{sign}</span><span class=\"text\">{}</span></div>",
-        old.map_or_else(String::new, |number| number.to_string()),
-        new.map_or_else(String::new, |number| number.to_string()),
-        escape(text)
-    )
-}
-
-/// Renders `markdown` as HTML, highlighting the code blocks.
-fn markdown(markdown: &str, theme: &Theme) -> String {
-    use pulldown_cmark::{Options, Parser, html};
-
-    // The same extensions the app's markdown widget enables.
-    let options = Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
-        | Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS
-        | Options::ENABLE_TABLES
-        | Options::ENABLE_STRIKETHROUGH
-        | Options::ENABLE_TASKLISTS;
-
-    // `push_html` passes raw HTML through, so prose like
-    // `Range<usize>` would become a tag; escape such `<` in the
-    // source first, leaving code regions to `push_html`.
-    let source = escape_raw_html(markdown);
-
-    let mut document = String::new();
-
-    html::push_html(&mut document, Parser::new_ext(&source, options));
-
-    highlight_code_blocks(document, theme)
-}
-
 /// Escapes the `<` of would-be raw HTML tags in the text of
 /// `markdown`, so that prose like `Range<usize>` renders literally
 /// instead of becoming a tag. Code regions — fenced blocks and
@@ -1298,6 +1457,513 @@ fn escape(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// A masked value.
+const MASKED: &str = "•••";
+
+/// The triggers of a secret-ish name: a name is secret-ish when
+/// it contains one of these as a segment.
+const TRIGGERS: &[&str] = &["key", "token", "secret", "pass", "pwd", "credential"];
+
+/// Common words that contain a trigger but are not secret
+/// names.
+const STOPWORDS: &[&str] = &[
+    "compass",
+    "donkey",
+    "hockey",
+    "monkey",
+    "passage",
+    "sneaky",
+    "tokenize",
+    "tokenizer",
+    "turkey",
+    "whiskey",
+];
+
+/// Masks the secrets and abbreviates the home directory in
+/// `text`, returning the masked text and the number of spans
+/// concealed.
+fn redact(text: &str) -> (String, usize) {
+    let (text, masked) = mask_secrets(text);
+    let (text, paths) = abbreviate_home(&text);
+
+    (text, masked + paths)
+}
+
+/// Masks the secrets in `text`, returning the masked text and
+/// the number of spans concealed.
+fn mask_secrets(text: &str) -> (String, usize) {
+    let mut masked = 0;
+    let mut lines = String::with_capacity(text.len());
+
+    for line in text.split_inclusive('\n') {
+        let (line, spans) = mask_line(line);
+        masked += spans;
+        lines.push_str(&line);
+    }
+
+    let (lines, blocks) = mask_private_key_blocks(&lines);
+
+    (lines, masked + blocks)
+}
+
+/// Masks the secrets on one line, returning the masked line and
+/// the number of spans concealed.
+fn mask_line(line: &str) -> (String, usize) {
+    // The line's content, without its ending newline.
+    let end = match line.strip_suffix('\n') {
+        Some(content) => content.len(),
+        None => line.len(),
+    };
+
+    let mut spans = Vec::new();
+
+    mask_headers(line, end, &mut spans);
+    mask_assignments(line, end, &mut spans);
+    mask_bearer(line, end, &mut spans);
+    mask_url_credentials(line, end, &mut spans);
+    mask_tokens(line, end, &mut spans);
+
+    replace_spans(line, spans)
+}
+
+/// Masks the value of an `Authorization` header.
+fn mask_headers(line: &str, end: usize, spans: &mut Vec<Range<usize>>) {
+    let lower = line[..end].to_lowercase();
+
+    if let Some((index, name)) = lower.match_indices("authorization:").next() {
+        spans.push(index + name.len()..end);
+    }
+}
+
+/// Masks the values of secret-ish assignments — `API_KEY=…`,
+/// `token: …` — leaving the names and separators.
+fn mask_assignments(line: &str, end: usize, spans: &mut Vec<Range<usize>>) {
+    for (index, separator) in line[..end].match_indices(['=', ':']) {
+        let separator = separator
+            .chars()
+            .next()
+            .expect("a matched separator is a character");
+        let name = name_before(line, index);
+
+        if !is_secret_name(name) {
+            continue;
+        }
+
+        let value = &line[index + 1..end];
+
+        if let Some(span) = value_span(value, separator) {
+            spans.push(index + 1 + span.start..index + 1 + span.end);
+        }
+    }
+}
+
+/// The run of identifier characters ending at `index` in `line`.
+fn name_before(line: &str, index: usize) -> &str {
+    let mut start = index;
+
+    for (i, c) in line[..index].char_indices().rev() {
+        if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+            start = i;
+        } else {
+            break;
+        }
+    }
+
+    &line[start..index]
+}
+
+/// Whether `name` looks like the name of a secret: a plausible
+/// identifier of at least four characters, not a common word,
+/// containing a trigger as a segment.
+fn is_secret_name(name: &str) -> bool {
+    if name.len() < 4
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return false;
+    }
+
+    if STOPWORDS.contains(&name.to_ascii_lowercase().as_str()) {
+        return false;
+    }
+
+    let lower = name.to_ascii_lowercase();
+
+    TRIGGERS.iter().any(|trigger| {
+        lower
+            .match_indices(trigger)
+            .any(|(index, _)| trigger_boundary(name, index))
+    })
+}
+
+/// Whether the trigger at `index` opens a segment of `name`: at
+/// the start, after a non-letter, or across a case change —
+/// `apiKey` and `APIKEY` yes, `monkey` no.
+fn trigger_boundary(name: &str, index: usize) -> bool {
+    if index == 0 {
+        return true;
+    }
+
+    let previous = name.as_bytes()[index - 1];
+
+    if !previous.is_ascii_alphabetic() {
+        return true;
+    }
+
+    // A lowercase letter never opens a segment mid-word.
+    name.as_bytes()[index].is_ascii_uppercase()
+}
+
+/// The span, in `value`, of the part of a value worth masking:
+/// an empty or indirect value — a variable reference, a
+/// placeholder — is not.
+fn value_span(value: &str, separator: char) -> Option<Range<usize>> {
+    let offset = value.len() - value.trim_start().len();
+    let value = &value[offset..];
+
+    if value.is_empty() || value.starts_with(['$', '<']) {
+        return None;
+    }
+
+    match value.as_bytes().first()? {
+        quote @ (b'"' | b'\'') => {
+            let rest = &value[1..];
+            let finish = rest
+                .find(*quote as char)
+                .map(|close| close + 1)
+                .unwrap_or(rest.len());
+            let inner = rest[..finish.saturating_sub(1)].trim();
+
+            if is_placeholder(inner) {
+                return None;
+            }
+
+            Some(offset..offset + finish)
+        }
+        _ => {
+            let finish = if separator == ':' {
+                value.len()
+            } else {
+                value.find(char::is_whitespace).unwrap_or(value.len())
+            };
+            let inner = value[..finish].trim_end();
+
+            if is_placeholder(inner) {
+                return None;
+            }
+
+            Some(offset..offset + inner.len())
+        }
+    }
+}
+
+/// Whether a value names nothing: a placeholder rather than a
+/// secret.
+fn is_placeholder(value: &str) -> bool {
+    matches!(value, "" | "null" | "none" | "true" | "false" | "-" | "…")
+}
+
+/// Masks a `Bearer` token: the run of word characters following
+/// the word, when it is long enough to be one — sixteen or
+/// more.
+fn mask_bearer(line: &str, end: usize, spans: &mut Vec<Range<usize>>) {
+    let lower = line[..end].to_lowercase();
+
+    for (index, _) in lower.match_indices("bearer") {
+        if index > 0 && line.as_bytes()[index - 1].is_ascii_alphabetic() {
+            continue;
+        }
+
+        let after = index + "bearer".len();
+        let rest = line[after..end].trim_start();
+        let offset = line[after..end].len() - rest.len();
+        let start = after + offset;
+        let finish = run_end_of(line, end, start, token_chars);
+
+        if finish - start >= 16 {
+            spans.push(start..finish);
+        }
+    }
+}
+
+/// Masks the password of a `scheme://user:pass@host` URL.
+fn mask_url_credentials(line: &str, end: usize, spans: &mut Vec<Range<usize>>) {
+    for (index, _) in line[..end].match_indices("://") {
+        let rest = &line[index + 3..end];
+        let whitespace = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let Some(at) = rest[..whitespace].find('@') else {
+            continue;
+        };
+
+        let authority = &rest[..at];
+        let Some(colon) = authority.find(':') else {
+            continue;
+        };
+
+        if colon + 1 < at {
+            spans.push(index + 3 + colon + 1..index + 3 + at);
+        }
+    }
+}
+
+/// Masks the known token shapes: the providers' prefixes, and
+/// the JSON Web Tokens.
+fn mask_tokens(line: &str, end: usize, spans: &mut Vec<Range<usize>>) {
+    for prefix in ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"] {
+        mask_prefixed(line, end, prefix, 16, None, spans, token_chars);
+    }
+
+    mask_prefixed(line, end, "sk-", 20, None, spans, token_chars);
+
+    for prefix in ["xoxb-", "xoxp-", "xoxa-", "xoxs-"] {
+        mask_prefixed(line, end, prefix, 10, None, spans, token_chars);
+    }
+
+    // An AWS access key id: `AKIA` and exactly sixteen capitals.
+    mask_prefixed(line, end, "AKIA", 16, Some(16), spans, aws_chars);
+
+    // A Google API key: `AIza` and exactly thirty-five
+    // characters.
+    mask_prefixed(line, end, "AIza", 35, Some(35), spans, token_chars);
+
+    mask_jwt(line, end, spans);
+}
+
+/// Masks each occurrence of `prefix` in `line` followed by a run
+/// of `is_char` characters — at least `min` long, exactly
+/// `exact` long when given — when the prefix is not embedded in
+/// a longer word.
+fn mask_prefixed(
+    line: &str,
+    end: usize,
+    prefix: &str,
+    min: usize,
+    exact: Option<usize>,
+    spans: &mut Vec<Range<usize>>,
+    is_char: impl Fn(char) -> bool,
+) {
+    let mut search_from = 0;
+
+    while let Some(index) = line[search_from..end].find(prefix) {
+        let index = search_from + index;
+
+        if word_boundary(line, index) {
+            let start = index + prefix.len();
+            let finish = run_end_of(line, end, start, &is_char);
+
+            match exact {
+                Some(exact) if finish - start == exact => spans.push(index..finish),
+                None if finish - start >= min => spans.push(index..finish),
+                _ => {}
+            }
+        }
+
+        search_from = index + 1;
+    }
+}
+
+/// Whether a token may start at `index` in `line`: not embedded
+/// in a longer run of word characters.
+fn word_boundary(line: &str, index: usize) -> bool {
+    line.as_bytes()
+        .get(index.wrapping_sub(1))
+        .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_' && *byte != b'-')
+}
+
+/// The end of the run of `is_char` characters starting at
+/// `start` in `line`, within `end`.
+fn run_end_of(line: &str, end: usize, start: usize, is_char: impl Fn(char) -> bool) -> usize {
+    let mut finish = start;
+
+    for (i, c) in line[start..end].char_indices() {
+        if is_char(c) {
+            finish = start + i + c.len_utf8();
+        } else {
+            break;
+        }
+    }
+
+    finish
+}
+
+/// The characters of a token: word characters, and the dash,
+/// dot, and underscore of the providers' alphabets.
+fn token_chars(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_')
+}
+
+/// The characters of an AWS access key id: capitals and digits.
+fn aws_chars(c: char) -> bool {
+    c.is_ascii_uppercase() || c.is_ascii_digit()
+}
+
+/// Masks a JSON Web Token: an `eyJ`-headed run of three
+/// base64url segments joined by dots.
+fn mask_jwt(line: &str, end: usize, spans: &mut Vec<Range<usize>>) {
+    let mut search_from = 0;
+
+    while let Some(index) = line[search_from..end].find("eyJ") {
+        let index = search_from + index;
+
+        if word_boundary(line, index)
+            && let Some(finish) = jwt_finish(line, end, index)
+        {
+            spans.push(index..finish);
+            search_from = finish;
+            continue;
+        }
+
+        search_from = index + 1;
+    }
+}
+
+/// The end of the JSON Web Token starting at `index` in `line`,
+/// when its segments look like base64url.
+fn jwt_finish(line: &str, end: usize, index: usize) -> Option<usize> {
+    let base64url = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_');
+
+    let rest = &line[index..end];
+    let mut segments = rest.split('.');
+    let head = segments.next()?;
+    let second = segments.next()?;
+    let third = segments.next()?;
+
+    if head.len() < 8 || second.len() < 8 {
+        return None;
+    }
+
+    if !(head.bytes().all(|byte| base64url(byte as char))
+        && second.bytes().all(|byte| base64url(byte as char)))
+    {
+        return None;
+    }
+
+    let third = third
+        .bytes()
+        .take_while(|byte| base64url(*byte as char))
+        .count();
+
+    Some(index + head.len() + 1 + second.len() + 1 + third)
+}
+
+/// Masks the bodies of private-key blocks: from a
+/// `-----BEGIN … PRIVATE KEY-----` marker to its `-----END …`
+/// marker, or, when the block is cut off, to the end of its
+/// base64 body.
+fn mask_private_key_blocks(text: &str) -> (String, usize) {
+    let mut spans = Vec::new();
+    let mut search_from = 0;
+
+    while let Some(index) = text[search_from..].find("-----BEGIN") {
+        let index = search_from + index;
+
+        let line_end = text[index..]
+            .find('\n')
+            .map_or(text.len(), |offset| index + offset);
+
+        if text[index..line_end].contains("PRIVATE KEY") {
+            let finish = match text[line_end..].find("-----END") {
+                Some(offset) => {
+                    let end = line_end + offset;
+                    end + text[end..].find('\n').map_or(0, |offset| offset + 1)
+                }
+                None => {
+                    let mut finish = line_end;
+
+                    for line in text[finish..].lines() {
+                        let base64 = line.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'=')
+                        });
+
+                        if line.is_empty() || !base64 {
+                            break;
+                        }
+
+                        finish += line.len() + 1;
+                    }
+
+                    finish
+                }
+            };
+
+            spans.push(index..finish);
+            search_from = finish;
+        } else {
+            search_from = index + 1;
+        }
+    }
+
+    replace_spans(text, spans)
+}
+
+/// Replaces the spans of `input` with `MASKED`, merging
+/// overlaps, and returns the text and the number of spans
+/// replaced.
+fn replace_spans(input: &str, spans: Vec<Range<usize>>) -> (String, usize) {
+    let mut spans: Vec<Range<usize>> = spans
+        .into_iter()
+        .filter(|span| span.start < span.end)
+        .collect();
+
+    if spans.is_empty() {
+        return (input.to_owned(), 0);
+    }
+
+    spans.sort_by_key(|span| span.start);
+
+    let mut merged: Vec<Range<usize>> = Vec::new();
+
+    for span in spans {
+        match merged.last_mut() {
+            Some(last) if span.start <= last.end => last.end = last.end.max(span.end),
+            _ => merged.push(span),
+        }
+    }
+
+    let mut output = String::with_capacity(input.len());
+    let mut start = 0;
+
+    for span in &merged {
+        output.push_str(&input[start..span.start]);
+        output.push_str(MASKED);
+        start = span.end;
+    }
+
+    output.push_str(&input[start..]);
+
+    (output, merged.len())
+}
+
+/// Abbreviates the home directory in `text` to `~`, returning
+/// the text and the number of paths abbreviated.
+fn abbreviate_home(text: &str) -> (String, usize) {
+    let Some(home) = std::env::home_dir() else {
+        return (text.to_owned(), 0);
+    };
+
+    abbreviate_home_in(text, &home.to_string_lossy())
+}
+
+/// The home abbreviation with the home directory given, so it
+/// can be tested.
+fn abbreviate_home_in(text: &str, home: &str) -> (String, usize) {
+    if home.is_empty() {
+        return (text.to_owned(), 0);
+    }
+
+    let (text, paths) = replace_count(text, &format!("{home}/"), "~/");
+    let (text, rest) = replace_count(&text, home, "~");
+
+    (text, paths + rest)
+}
+
+/// Replaces `from` with `to` in `text`, returning the text and
+/// the number of replacements.
+fn replace_count(text: &str, from: &str, to: &str) -> (String, usize) {
+    (text.replace(from, to), text.matches(from).count())
+}
+
 /// The CSS color of an iced color.
 fn hex(color: Color) -> String {
     let [r, g, b, _] = color.into_rgba8();
@@ -1320,6 +1986,14 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     fn export(items: Vec<session::Item>) -> String {
+        export_all(items, None, false).0
+    }
+
+    fn export_all(
+        items: Vec<session::Item>,
+        title: Option<&str>,
+        raw: bool,
+    ) -> (String, Redactions) {
         super::export(
             &Session {
                 version: session::Version::current(),
@@ -1328,21 +2002,13 @@ mod tests {
             },
             &Project::current_dir().expect("a project exists"),
             &Theme::CatppuccinMocha,
-            None,
+            title,
+            raw,
         )
     }
 
     fn export_titled(items: Vec<session::Item>, title: &str) -> String {
-        super::export(
-            &Session {
-                version: session::Version::current(),
-                started_at: SystemTime::UNIX_EPOCH,
-                items,
-            },
-            &Project::current_dir().expect("a project exists"),
-            &Theme::CatppuccinMocha,
-            Some(title),
-        )
+        export_all(items, Some(title), false).0
     }
 
     fn assistant(
@@ -2038,5 +2704,109 @@ mod tests {
         })]);
 
         assert!(document.contains("Compacted into 1,234,567 tokens"));
+    }
+
+    #[test]
+    fn redact_masks_the_known_secret_shapes() {
+        let (text, masked) = super::redact(
+            "token=ghp_abcdefghijklmnopqrstuvwxyz1234567890\n\
+             Authorization: Bearer abcdefghijklmnopqrstuvwxyz\n\
+             https://user:password123@example.com/v1\n\
+             aws AKIAABCDEFGHIJKLMNOP\n\
+             jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.dozjgNryopLUGyK5",
+        );
+
+        assert!(!text.contains("ghp_"));
+        assert!(!text.contains("Bearer abcdef"));
+        assert!(text.contains("https://user:•••@example.com"));
+        assert!(!text.contains("AKIA"));
+        assert!(!text.contains("eyJhbG"));
+        assert!(masked >= 5);
+    }
+
+    #[test]
+    fn redact_masks_a_secret_assignment_and_not_a_common_word() {
+        let (text, masked) = super::redact("API_KEY=abc123\ndevice: monkey\nmonkey: 3\n");
+
+        assert!(text.starts_with("API_KEY=•••"));
+        assert!(text.contains("device: monkey"));
+        assert!(text.contains("monkey: 3"));
+        assert_eq!(masked, 1);
+    }
+
+    #[test]
+    fn redact_abbreviates_the_home_directory() {
+        let (text, count) =
+            super::abbreviate_home_in("in /home/hector/projects and /home/hector", "/home/hector");
+
+        assert_eq!(text, "in ~/projects and ~");
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn a_secret_in_a_tool_output_is_masked() {
+        let mut output = Output::new();
+        output.push("API_KEY=sk-abcdefghijklmnopqrstuvwxyz1234567890".to_owned());
+
+        let run = session::Item::Tool(session::ToolRun {
+            call: call("c1", "bash", r#"{"command":"echo $API_KEY"}"#),
+            status: session::Status::Success { output },
+        });
+
+        let (document, redactions) = export_all(vec![run], None, false);
+
+        assert!(document.contains("•••"));
+        assert!(!document.contains("sk-abcdef"));
+        assert!(redactions.masked > 0);
+    }
+
+    #[test]
+    fn an_env_listing_is_concealed() {
+        let mut output = Output::new();
+        output.push("API_KEY=abc123".to_owned());
+
+        let run = session::Item::Tool(session::ToolRun {
+            call: call("c1", "bash", r#"{"command":"env"}"#),
+            status: session::Status::Success { output },
+        });
+
+        let (document, redactions) = export_all(vec![run], None, false);
+
+        assert!(document.contains("[redacted: may contain credentials]"));
+        assert!(!document.contains("abc123"));
+        assert_eq!(redactions.blocks, 1);
+    }
+
+    #[test]
+    fn a_read_of_a_credentials_file_is_concealed() {
+        let mut output = Output::new();
+        output.push("machine api.example login: bot password: hunter2".to_owned());
+
+        let run = session::Item::Tool(session::ToolRun {
+            call: call("c1", "read", r#"{"path":".netrc"}"#),
+            status: session::Status::Success { output },
+        });
+
+        let (document, redactions) = export_all(vec![run], None, false);
+
+        assert!(document.contains("[redacted: may contain credentials]"));
+        assert!(!document.contains("hunter2"));
+        assert_eq!(redactions.blocks, 1);
+    }
+
+    #[test]
+    fn a_raw_export_conceals_nothing() {
+        let mut output = Output::new();
+        output.push("API_KEY=abc123".to_owned());
+
+        let run = session::Item::Tool(session::ToolRun {
+            call: call("c1", "bash", r#"{"command":"env"}"#),
+            status: session::Status::Success { output },
+        });
+
+        let (document, redactions) = export_all(vec![run], None, true);
+
+        assert!(document.contains("API_KEY=abc123"));
+        assert!(redactions.is_empty());
     }
 }

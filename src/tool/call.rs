@@ -25,6 +25,13 @@ pub trait Call {
     fn view(&self) -> Option<Element<'_, Never>> {
         None
     }
+
+    /// Whether the call may expose credentials in its view or
+    /// output: it lists the environment or configuration, or it
+    /// addresses a credentials file.
+    fn is_sensitive(&self, _project: &Project) -> bool {
+        false
+    }
 }
 
 pub type Output = Result<tool::Output, reason::Error>;

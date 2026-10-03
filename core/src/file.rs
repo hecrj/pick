@@ -56,6 +56,41 @@ fn normalize(path: &Path) -> PathBuf {
     folded
 }
 
+/// Whether `path` points at a file that likely holds credentials:
+/// a well-known credentials name, an `.env` variant, or a key
+/// file extension.
+pub fn is_sensitive(path: impl AsRef<Path>) -> bool {
+    /// The file names that hold credentials.
+    const SENSITIVE_FILES: &[&str] = &[
+        ".env",
+        ".netrc",
+        "_netrc",
+        ".npmrc",
+        ".pypirc",
+        ".htpasswd",
+        ".git-credentials",
+        "id_rsa",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+        "credentials",
+        "secrets",
+    ];
+
+    /// The file extensions that hold keys.
+    const SENSITIVE_SUFFIXES: &[&str] = &[".pem", ".key", ".p12", ".pfx"];
+
+    let Some(name) = path.as_ref().file_name().map(|name| name.to_string_lossy()) else {
+        return false;
+    };
+
+    SENSITIVE_FILES.contains(&name.as_ref())
+        || name.starts_with(".env.")
+        || SENSITIVE_SUFFIXES
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{lock, normalize};

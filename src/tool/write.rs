@@ -45,6 +45,10 @@ impl Call for Write {
         ))
     }
 
+    fn is_sensitive(&self, _project: &Project) -> bool {
+        file::is_sensitive(&self.path)
+    }
+
     fn view(&self) -> Option<Element<'_, Never>> {
         let preview = &self.preview;
 

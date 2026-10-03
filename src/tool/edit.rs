@@ -59,6 +59,10 @@ impl Call for Edit {
         ))
     }
 
+    fn is_sensitive(&self, _project: &Project) -> bool {
+        file::is_sensitive(&self.path)
+    }
+
     fn view(&self) -> Option<Element<'_, Never>> {
         Some(
             container(
