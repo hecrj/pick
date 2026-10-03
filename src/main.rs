@@ -219,7 +219,7 @@ fn export(
     };
 
     let (document, redactions) =
-        html::export(&session, project, &Theme::CatppuccinMocha, title, raw);
+        html::generate(&session, project, &Theme::CatppuccinMocha, title, raw);
 
     std::fs::write(&output, document).unwrap_or_else(|error| {
         eprintln!("failed to write {}: {error}", output.display());
@@ -227,13 +227,10 @@ fn export(
     });
 
     println!("exported: {}", output.display());
-
-    if !redactions.is_empty() {
-        println!(
-            "redacted {} spans and {} blocks",
-            redactions.masked, redactions.blocks
-        );
-    }
+    println!(
+        "redacted {} spans and {} blocks",
+        redactions.spans, redactions.blocks
+    );
 
     if open {
         open_document(&output);

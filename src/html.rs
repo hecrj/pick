@@ -9,6 +9,100 @@ use iced::{Color, Theme, time};
 use std::ops::Range;
 use std::path::Path;
 
+/// Exports `session` as a standalone HTML document, styled by
+/// `theme`, unless `raw`, in which case the content is exported
+/// verbatim. Returns the document and the tally of what it
+/// concealed.
+pub fn generate(
+    session: &Session,
+    project: &Project,
+    theme: &Theme,
+    title: Option<&str>,
+    raw: bool,
+) -> (String, Redactions) {
+    let mut render = Render {
+        html: String::new(),
+        project,
+        theme,
+        raw,
+        redactions: Redactions::default(),
+    };
+
+    let started = jiff::Timestamp::try_from(session.started_at)
+        .ok()
+        .map(|started| {
+            started
+                .to_zoned(jiff::tz::TimeZone::system())
+                .strftime("%Y-%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_default();
+
+    let count = session.items.len();
+    let count = if count == 1 {
+        "1 item".to_owned()
+    } else {
+        format!("{count} items")
+    };
+
+    // The given title, or none: it headlines the session, above
+    // its metadata, and names the document.
+    let title = title.filter(|title| !title.is_empty());
+
+    render.html(
+        "<!doctype html>\n\
+         <html lang=\"en\">\n\
+         <head>\n\
+         <meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n",
+    );
+
+    render.tag("title", "", |r| r.text(title.unwrap_or("Piolet session")));
+
+    render.html(&format!(
+        "\n\
+         <style>\n{style}\n</style>\n\
+         </head>\n\
+         <body>\n\
+         <main class=\"session\">\n\
+         <header class=\"session-header\">",
+        style = style(theme),
+    ));
+
+    if let Some(title) = title {
+        render.tag("h1", " class=\"session-title\"", |r| r.text(title));
+    }
+
+    render.tag("div", " class=\"session-meta\"", |r| {
+        r.text(&format!(
+            "{started} · {count} · Piolet {}",
+            env!("CARGO_PKG_VERSION")
+        ));
+    });
+
+    render.html("</header>\n");
+
+    items(&session.items, &mut render);
+
+    render.html(&format!(
+        "</main>\n<script>{}</script>\n</body>\n</html>\n",
+        SCRIPT.trim()
+    ));
+
+    (render.html, render.redactions)
+}
+
+/// The tally of what an export concealed: the spans of text it
+/// masked, and the blocks it replaced with a redaction notice.
+#[derive(Default)]
+pub struct Redactions {
+    /// The spans masked: secrets and home paths.
+    pub spans: usize,
+    /// The blocks replaced: the views and outputs of calls that
+    /// may expose credentials.
+    pub blocks: usize,
+}
+
 /// The static styles of the document, colored by the `:root`
 /// variables generated from the theme.
 const CSS: &str = r#"
@@ -433,24 +527,6 @@ for (const tool of document.querySelectorAll('details.item.tool')) {
 }
 "#;
 
-/// The tally of what an export concealed: the spans of text it
-/// masked, and the blocks it replaced with a redaction notice.
-#[derive(Default, Debug, PartialEq, Eq)]
-pub struct Redactions {
-    /// The spans masked: secrets and home paths.
-    pub masked: usize,
-    /// The blocks replaced: the views and outputs of calls that
-    /// may expose credentials.
-    pub blocks: usize,
-}
-
-impl Redactions {
-    /// Whether nothing was concealed.
-    pub fn is_empty(&self) -> bool {
-        self.masked == 0 && self.blocks == 0
-    }
-}
-
 /// The context of an export being rendered: the document it
 /// builds, what it renders against, and how it treats sensitive
 /// content. Every byte of the document is written through its
@@ -491,7 +567,7 @@ impl Render<'_> {
         }
 
         let (text, masked) = redact(text, self.project.home.as_deref());
-        self.redactions.masked += masked;
+        self.redactions.spans += masked;
         text
     }
 
@@ -507,89 +583,6 @@ impl Render<'_> {
         self.redactions.blocks += 1;
         "[redacted: may contain credentials]"
     }
-}
-
-/// Exports `session` as a standalone HTML document, styled by
-/// `theme`, unless `raw`, in which case the content is exported
-/// verbatim. Returns the document and the tally of what it
-/// concealed.
-pub fn export(
-    session: &Session,
-    project: &Project,
-    theme: &Theme,
-    title: Option<&str>,
-    raw: bool,
-) -> (String, Redactions) {
-    let mut render = Render {
-        html: String::new(),
-        project,
-        theme,
-        raw,
-        redactions: Redactions::default(),
-    };
-
-    let started = jiff::Timestamp::try_from(session.started_at)
-        .ok()
-        .map(|started| {
-            started
-                .to_zoned(jiff::tz::TimeZone::system())
-                .strftime("%Y-%m-%d %H:%M")
-                .to_string()
-        })
-        .unwrap_or_default();
-
-    let count = session.items.len();
-    let count = if count == 1 {
-        "1 item".to_owned()
-    } else {
-        format!("{count} items")
-    };
-
-    // The given title, or none: it headlines the session, above
-    // its metadata, and names the document.
-    let title = title.filter(|title| !title.is_empty());
-
-    render.html(
-        "<!doctype html>\n\
-         <html lang=\"en\">\n\
-         <head>\n\
-         <meta charset=\"utf-8\">\n\
-         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n",
-    );
-
-    render.tag("title", "", |r| r.text(title.unwrap_or("Piolet session")));
-
-    render.html(&format!(
-        "\n\
-         <style>\n{style}\n</style>\n\
-         </head>\n\
-         <body>\n\
-         <main class=\"session\">\n\
-         <header class=\"session-header\">",
-        style = style(theme),
-    ));
-
-    if let Some(title) = title {
-        render.tag("h1", " class=\"session-title\"", |r| r.text(title));
-    }
-
-    render.tag("div", " class=\"session-meta\"", |r| {
-        r.text(&format!(
-            "{started} · {count} · Piolet {}",
-            env!("CARGO_PKG_VERSION")
-        ));
-    });
-
-    render.html("</header>\n");
-
-    items(&session.items, &mut render);
-
-    render.html(&format!(
-        "</main>\n<script>{}</script>\n</body>\n</html>\n",
-        SCRIPT.trim()
-    ));
-
-    (render.html, render.redactions)
 }
 
 /// The `<style>` block of the document: the `:root` variables
@@ -1995,7 +1988,7 @@ mod tests {
         title: Option<&str>,
         raw: bool,
     ) -> (String, Redactions) {
-        super::export(
+        super::generate(
             &Session {
                 version: session::Version::current(),
                 started_at: SystemTime::UNIX_EPOCH,
@@ -2759,7 +2752,7 @@ mod tests {
 
         assert!(document.contains("•••"));
         assert!(!document.contains("sk-abcdef"));
-        assert!(redactions.masked > 0);
+        assert!(redactions.spans > 0);
     }
 
     #[test]
@@ -2809,6 +2802,6 @@ mod tests {
         let (document, redactions) = export_all(vec![run], None, true);
 
         assert!(document.contains("API_KEY=abc123"));
-        assert!(redactions.is_empty());
+        assert_eq!((redactions.spans, redactions.blocks), (0, 0));
     }
 }
