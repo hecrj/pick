@@ -1167,73 +1167,6 @@ impl Turn {
                 .map(Message::Item.with(i))
                 .boxed(),
             Turn::Work { start, end } => {
-                let mut reasoning = time::Duration::ZERO;
-                let mut command = String::new();
-                let mut commands = 0;
-                let mut reads = 0;
-                let mut edits = 0;
-                let mut writes = 0;
-
-                for item in &messages[start..end] {
-                    match item {
-                        Item::Assistant(reply) if let Some(timings) = reply.timings => {
-                            reasoning += timings.reasoning;
-                        }
-                        Item::Tool(run) => match run.call.name.as_str() {
-                            "bash" => {
-                                if command.is_empty()
-                                    && let Ok(state) = &run.state
-                                    && let Some(title) = state.title(project)
-                                {
-                                    command = title.into_owned();
-                                }
-
-                                commands += 1
-                            }
-                            "read" => reads += 1,
-                            "edit" => edits += 1,
-                            "write" => writes += 1,
-                            _ => {}
-                        },
-                        _ => {}
-                    }
-                }
-
-                let inflect = |word: &str, count| {
-                    if count == 1 {
-                        word.to_owned()
-                    } else {
-                        format!("{word}s")
-                    }
-                };
-
-                let mut summary = [
-                    (commands > 0).then(|| {
-                        if commands == 1 && !command.is_empty() {
-                            command
-                        } else {
-                            format!("ran {commands} {}", inflect("command", commands))
-                        }
-                    }),
-                    (reads > 0).then(|| format!("read {reads} {}", inflect("file", reads))),
-                    (edits > 0).then(|| format!("edited {edits} {}", inflect("file", edits))),
-                    (writes > 0).then(|| format!("wrote {writes} {}", inflect("file", writes))),
-                    (reasoning > time::Duration::ZERO)
-                        .then(|| format!("thought for {}", item::duration(reasoning))),
-                ]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-                .join(", ");
-
-                if summary.is_empty() {
-                    summary = "Catching up...".to_owned();
-                }
-
-                let capital = summary.ceil_char_boundary(1);
-                let c = summary[..capital].to_uppercase();
-                summary.replace_range(..capital, &c);
-
                 let reply = if let Some(item @ Item::Assistant(reply)) = messages.get(end - 1)
                     && !reply.content.is_empty()
                 {
@@ -1245,54 +1178,136 @@ impl Turn {
                     None
                 };
 
-                let collapsible = widget::collapsible(
-                    messages.len() == end && reply.is_none(),
-                    move |open| {
-                        container(
-                            text!("{}  {}", summary, widget::arrow(open))
-                                .size(font::SMALL)
-                                .font(font::BOLD),
-                        )
-                        .width(Fill)
-                        .padding(10)
-                        .style(|theme| container::Style {
-                            text_color: None,
-                            ..container::bordered_box(theme)
-                        })
-                    },
-                    move || {
-                        row![
-                            rule::vertical(2).style(rule::weak),
-                            column(messages[start..end].iter().enumerate().filter_map(
-                                |(i, item)| {
-                                    Some(match item {
-                                        Item::Assistant(reply) => column![
-                                            item::upload(reply, i == 0),
-                                            (!reply.reasoning.is_empty())
-                                                .then(|| item::reasoning(reply, true)),
-                                        ]
-                                        .spacing(10)
+                let items = move || {
+                    column(
+                        messages[start..end]
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, item)| {
+                                Some(match item {
+                                    Item::Assistant(reply) => column![
+                                        item::upload(reply, i == 0),
+                                        (!reply.reasoning.is_empty())
+                                            .then(|| item::reasoning(reply, true)),
+                                    ]
+                                    .spacing(10)
+                                    .map(Message::Item.with(start + i))
+                                    .boxed(),
+                                    Item::Tool(_) => item
+                                        .view(project, true)
                                         .map(Message::Item.with(start + i))
                                         .boxed(),
-                                        Item::Tool(_) => item
-                                            .view(project, true)
-                                            .map(Message::Item.with(start + i))
-                                            .boxed(),
-                                        _ => return None,
-                                    })
-                                }
-                            ))
-                            .padding(padding::top(10))
-                            .spacing(10)
-                        ]
-                        .spacing(10)
-                        .padding(padding::left(10))
-                        .height(Shrink)
-                    },
-                );
+                                    _ => return None,
+                                })
+                            }),
+                    )
+                };
 
-                column![collapsible, reply].spacing(20).boxed()
+                let group = if start + 1 == end {
+                    items().boxed()
+                } else {
+                    let summary = summary(project, &messages[start..end]);
+
+                    widget::collapsible(
+                        messages.len() == end && reply.is_none(),
+                        move |open| {
+                            container(
+                                text!("{}  {}", summary, widget::arrow(open))
+                                    .size(font::SMALL)
+                                    .font(font::BOLD),
+                            )
+                            .width(Fill)
+                            .padding(10)
+                            .style(|theme| container::Style {
+                                text_color: None,
+                                ..container::bordered_box(theme)
+                            })
+                        },
+                        move || {
+                            row![
+                                rule::vertical(2).style(rule::weak),
+                                items().padding(padding::top(10)).spacing(10)
+                            ]
+                            .spacing(10)
+                            .padding(padding::left(10))
+                            .height(Shrink)
+                        },
+                    )
+                    .boxed()
+                };
+
+                column![group, reply].spacing(20).boxed()
             }
         }
     }
+}
+
+fn summary(project: &Project, messages: &[Item]) -> String {
+    let mut reasoning = time::Duration::ZERO;
+    let mut command = String::new();
+    let mut commands = 0;
+    let mut reads = 0;
+    let mut edits = 0;
+    let mut writes = 0;
+
+    for item in messages {
+        match item {
+            Item::Assistant(reply) if let Some(timings) = reply.timings => {
+                reasoning += timings.reasoning;
+            }
+            Item::Tool(run) => match run.call.name.as_str() {
+                "bash" => {
+                    if command.is_empty()
+                        && let Ok(state) = &run.state
+                        && let Some(title) = state.title(project)
+                    {
+                        command = title.into_owned();
+                    }
+
+                    commands += 1
+                }
+                "read" => reads += 1,
+                "edit" => edits += 1,
+                "write" => writes += 1,
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    let inflect = |word: &str, count| {
+        if count == 1 {
+            word.to_owned()
+        } else {
+            format!("{word}s")
+        }
+    };
+
+    let mut summary = [
+        (commands > 0).then(|| {
+            if commands == 1 && !command.is_empty() {
+                command
+            } else {
+                format!("ran {commands} {}", inflect("command", commands))
+            }
+        }),
+        (reads > 0).then(|| format!("read {reads} {}", inflect("file", reads))),
+        (edits > 0).then(|| format!("edited {edits} {}", inflect("file", edits))),
+        (writes > 0).then(|| format!("wrote {writes} {}", inflect("file", writes))),
+        (reasoning > time::Duration::ZERO)
+            .then(|| format!("thought for {}", item::duration(reasoning))),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(", ");
+
+    if summary.is_empty() {
+        summary = "Catching up...".to_owned();
+    }
+
+    let capital = summary.ceil_char_boundary(1);
+    let c = summary[..capital].to_uppercase();
+    summary.replace_range(..capital, &c);
+    summary
 }

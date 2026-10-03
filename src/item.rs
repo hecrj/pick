@@ -419,7 +419,7 @@ pub fn reasoning(reply: &Reply, compact: bool) -> impl Widget<Message> {
             }
             None => text(if is_done { "Thought" } else { "Thinking..." }),
         }
-        .size(font::SMALL)
+        .size(font::TINY)
         .font(font::BOLD)
         .width(Fill)
     };
@@ -429,20 +429,22 @@ pub fn reasoning(reply: &Reply, compact: bool) -> impl Widget<Message> {
         move |_open| header(),
         move || {
             container(
-                scrollable(
-                    markdown::view(reply.reasoning.items(), Font::MONOSPACE, font::SMALL)
-                        .map(Message::LinkClicked),
+                container(
+                    scrollable(
+                        markdown::view(reply.reasoning.items(), Font::MONOSPACE, font::TINY)
+                            .map(Message::LinkClicked),
+                    )
+                    .width(Fill)
+                    .height(Fit.max(MAX_HEIGHT))
+                    .spacing(5)
+                    .on_scroll(widget::snap.with(operation::Animation::Instant)),
                 )
-                .width(Fill)
-                .height(Fit.max(MAX_HEIGHT))
-                .spacing(10)
-                .on_scroll(widget::snap.with(operation::Animation::Instant)),
+                .padding(10)
+                .style(summary),
             )
-            .padding(padding::top(10))
+            .padding(padding::top(5))
         },
     ))
-    .padding(10)
-    .style(summary)
 }
 
 pub fn summary(theme: &Theme) -> container::Style {
