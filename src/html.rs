@@ -7,6 +7,7 @@ use iced::highlighter;
 use iced::theme::palette;
 use iced::{Color, Theme, time};
 use std::ops::Range;
+use std::path::Path;
 
 /// The static styles of the document, colored by the `:root`
 /// variables generated from the theme.
@@ -489,7 +490,7 @@ impl Render<'_> {
             return text.to_owned();
         }
 
-        let (text, masked) = redact(text);
+        let (text, masked) = redact(text, self.project.home.as_deref());
         self.redactions.masked += masked;
         text
     }
@@ -1482,9 +1483,9 @@ const STOPWORDS: &[&str] = &[
 /// Masks the secrets and abbreviates the home directory in
 /// `text`, returning the masked text and the number of spans
 /// concealed.
-fn redact(text: &str) -> (String, usize) {
+fn redact(text: &str, home: Option<&Path>) -> (String, usize) {
     let (text, masked) = mask_secrets(text);
-    let (text, paths) = abbreviate_home(&text);
+    let (text, paths) = abbreviate_home(&text, home);
 
     (text, masked + paths)
 }
@@ -1937,8 +1938,8 @@ fn replace_spans(input: &str, spans: Vec<Range<usize>>) -> (String, usize) {
 
 /// Abbreviates the home directory in `text` to `~`, returning
 /// the text and the number of paths abbreviated.
-fn abbreviate_home(text: &str) -> (String, usize) {
-    let Some(home) = std::env::home_dir() else {
+fn abbreviate_home(text: &str, home: Option<&Path>) -> (String, usize) {
+    let Some(home) = home else {
         return (text.to_owned(), 0);
     };
 
@@ -2714,6 +2715,7 @@ mod tests {
              https://user:password123@example.com/v1\n\
              aws AKIAABCDEFGHIJKLMNOP\n\
              jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.dozjgNryopLUGyK5",
+            None,
         );
 
         assert!(!text.contains("ghp_"));
@@ -2726,7 +2728,7 @@ mod tests {
 
     #[test]
     fn redact_masks_a_secret_assignment_and_not_a_common_word() {
-        let (text, masked) = super::redact("API_KEY=abc123\ndevice: monkey\nmonkey: 3\n");
+        let (text, masked) = super::redact("API_KEY=abc123\ndevice: monkey\nmonkey: 3\n", None);
 
         assert!(text.starts_with("API_KEY=•••"));
         assert!(text.contains("device: monkey"));
